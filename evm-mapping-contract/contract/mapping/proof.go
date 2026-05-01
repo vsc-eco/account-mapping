@@ -263,6 +263,17 @@ func parseLegacyTx(data []byte) (*ParsedTx, error) {
 	return parsed, nil
 }
 
+func reencodeItem(item rlp.Item) []byte {
+	if !item.IsList {
+		return rlp.EncodeBytes(item.AsBytes())
+	}
+	children := make([][]byte, len(item.Children))
+	for i, child := range item.Children {
+		children[i] = reencodeItem(child)
+	}
+	return rlp.EncodeList(children...)
+}
+
 func computeTxSighash(raw []byte, tx *ParsedTx) []byte {
 	// For EIP-1559: sighash = keccak256(0x02 || RLP([chainId, nonce, ...fields without v,r,s]))
 	// For legacy EIP-155: sighash = keccak256(RLP([nonce, gasPrice, gas, to, value, data, chainId, 0, 0]))
@@ -278,21 +289,7 @@ func computeTxSighash(raw []byte, tx *ParsedTx) []byte {
 		unsigned := make([][]byte, 9)
 		for i := 0; i < 9; i++ {
 			if items[i].IsList {
-				// BUG: this only preserves a single level of children. EIP-2930
-				// access list entries are themselves lists ([address, [storageKeys...]]),
-				// so the storage-keys sublist is silently re-encoded as empty here. The
-				// resulting sighash will mismatch for any tx with non-empty storage keys.
-				// Safe today only because BuildETHWithdrawalTx / BuildERC20WithdrawalTx
-				// always emit an empty access list (withdrawal.go:114).
-				children := make([][]byte, len(items[i].Children))
-				for j, child := range items[i].Children {
-					if child.IsList {
-						children[j] = rlp.EncodeList()
-					} else {
-						children[j] = rlp.EncodeBytes(child.AsBytes())
-					}
-				}
-				unsigned[i] = rlp.EncodeList(children...)
+				unsigned[i] = reencodeItem(items[i])
 			} else {
 				unsigned[i] = rlp.EncodeBytes(items[i].AsBytes())
 			}
