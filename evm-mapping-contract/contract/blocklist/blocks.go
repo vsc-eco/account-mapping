@@ -2,8 +2,8 @@ package blocklist
 
 import (
 	"encoding/hex"
-	"errors"
 	"evm-mapping-contract/contract/constants"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/sdk"
 	"strconv"
 )
@@ -33,7 +33,7 @@ func (h *EthBlockHeader) Serialize() string {
 func DeserializeHeader(data string) (*EthBlockHeader, error) {
 	buf := []byte(data)
 	if len(buf) < 128 { // 8 + 32 + 32 + 32 + 8 + 8 + 8 = 128
-		return nil, errors.New("header data too short")
+		return nil, ce.NewContractError(ce.ErrStateAccess, "header data too short")
 	}
 	h := &EthBlockHeader{}
 	offset := 0
@@ -123,25 +123,25 @@ func HandleAddBlocks(params *AddBlocksParams) error {
 	lastHeight := GetLastHeight()
 
 	if lastHeight == 0 {
-		return errors.New("contract not seeded: call seedBlocks first")
+		return ce.NewContractError(ce.ErrInitialization, "contract not seeded: call seedBlocks first")
 	}
 
 	for _, entry := range params.Blocks {
 		if entry.BlockNumber != lastHeight+1 {
-			return errors.New("block heights must be sequential")
+			return ce.NewContractError(ce.ErrInput, "block heights must be sequential")
 		}
 
 		stateRoot, err := hexTo32(entry.StateRoot)
 		if err != nil {
-			return errors.New("invalid state_root hex")
+			return ce.WrapContractError(ce.ErrInvalidHex, err, "state_root")
 		}
 		txRoot, err := hexTo32(entry.TransactionsRoot)
 		if err != nil {
-			return errors.New("invalid transactions_root hex")
+			return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
 		}
 		rcptRoot, err := hexTo32(entry.ReceiptsRoot)
 		if err != nil {
-			return errors.New("invalid receipts_root hex")
+			return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
 		}
 
 		header := EthBlockHeader{
@@ -172,7 +172,7 @@ func hexTo32(s string) ([32]byte, error) {
 	var result [32]byte
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != 32 {
-		return result, errors.New("invalid 32-byte hex")
+		return result, ce.NewContractError(ce.ErrInvalidHex, "invalid 32-byte hex")
 	}
 	copy(result[:], b)
 	return result, nil
@@ -196,15 +196,15 @@ func readUint64(buf []byte, offset *int) uint64 {
 
 func HandleSeedBlock(entry *AddBlockEntry) error {
 	if entry.BlockNumber == 0 {
-		return errors.New("seed block_number must be > 0")
+		return ce.NewContractError(ce.ErrInput, "seed block_number must be > 0")
 	}
 	txRoot, err := hexTo32(entry.TransactionsRoot)
 	if err != nil {
-		return errors.New("invalid transactions_root hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
 	}
 	rcptRoot, err := hexTo32(entry.ReceiptsRoot)
 	if err != nil {
-		return errors.New("invalid receipts_root hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
 	}
 	header := EthBlockHeader{
 		BlockNumber:      entry.BlockNumber,
@@ -222,20 +222,20 @@ func HandleSeedBlock(entry *AddBlockEntry) error {
 func HandleReplaceBlock(entry *AddBlockEntry) error {
 	existing := GetHeader(entry.BlockNumber)
 	if existing == nil {
-		return errors.New("block not found for replacement")
+		return ce.NewContractError(ce.ErrStateAccess, "block not found for replacement")
 	}
 
 	stateRoot, err := hexTo32(entry.StateRoot)
 	if err != nil {
-		return errors.New("invalid state_root hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "state_root")
 	}
 	txRoot, err := hexTo32(entry.TransactionsRoot)
 	if err != nil {
-		return errors.New("invalid transactions_root hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
 	}
 	rcptRoot, err := hexTo32(entry.ReceiptsRoot)
 	if err != nil {
-		return errors.New("invalid receipts_root hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
 	}
 
 	header := EthBlockHeader{

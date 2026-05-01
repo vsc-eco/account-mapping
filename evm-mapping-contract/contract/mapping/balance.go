@@ -1,30 +1,42 @@
 package mapping
 
 import (
-	"errors"
 	"evm-mapping-contract/contract/constants"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/sdk"
 	"math"
+	"math/big"
 	"strconv"
 )
 
-func safeCastGasFee(gas uint64, feeCap uint64) (int64, error) {
-	product := gas * feeCap
-	if feeCap != 0 && product/feeCap != gas {
-		return 0, errors.New("gas fee overflow")
+// safeMulAddU64 returns a*b + c, computed in big.Int and range-checked to uint64.
+// Used for gasFeeCap = baseFeePerGas*multiplier + tipCap, where the intermediate
+// product can wrap a native uint64 even when the final value fits.
+func safeMulAddU64(a, b, c uint64) (uint64, error) {
+	r := new(big.Int).Mul(new(big.Int).SetUint64(a), new(big.Int).SetUint64(b))
+	r.Add(r, new(big.Int).SetUint64(c))
+	if !r.IsUint64() {
+		return 0, ce.NewContractError(ce.ErrArithmetic, "uint64 overflow")
 	}
-	if product > uint64(math.MaxInt64) {
-		return 0, errors.New("gas fee exceeds max int64")
+	return r.Uint64(), nil
+}
+
+// safeMulU64ToI64 returns a*b, computed in big.Int and range-checked to int64.
+// Gas fees must land as int64 because the balance ledger is int64.
+func safeMulU64ToI64(a, b uint64) (int64, error) {
+	r := new(big.Int).Mul(new(big.Int).SetUint64(a), new(big.Int).SetUint64(b))
+	if !r.IsInt64() {
+		return 0, ce.NewContractError(ce.ErrArithmetic, "int64 overflow")
 	}
-	return int64(product), nil
+	return r.Int64(), nil
 }
 
 func safeAdd64(a, b int64) (int64, error) {
 	if a > 0 && b > math.MaxInt64-a {
-		return 0, errors.New("overflow")
+		return 0, ce.NewContractError(ce.ErrArithmetic, "overflow")
 	}
 	if a < 0 && b < math.MinInt64-a {
-		return 0, errors.New("underflow")
+		return 0, ce.NewContractError(ce.ErrArithmetic, "underflow")
 	}
 	return a + b, nil
 }

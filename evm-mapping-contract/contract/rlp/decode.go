@@ -1,12 +1,14 @@
 package rlp
 
-import "errors"
+import (
+	ce "evm-mapping-contract/contract/contracterrors"
+)
 
 var (
-	ErrTooShort       = errors.New("rlp: input too short")
-	ErrNonCanonical   = errors.New("rlp: non-canonical encoding")
-	ErrDepthExceeded  = errors.New("rlp: max depth exceeded")
-	ErrOversized      = errors.New("rlp: item exceeds max size")
+	ErrTooShort      = ce.NewContractError(ce.ErrInput, "rlp: input too short")
+	ErrNonCanonical  = ce.NewContractError(ce.ErrInput, "rlp: non-canonical encoding")
+	ErrDepthExceeded = ce.NewContractError(ce.ErrInput, "rlp: max depth exceeded")
+	ErrOversized    = ce.NewContractError(ce.ErrInput, "rlp: item exceeds max size")
 )
 
 const maxDepth = 20
@@ -28,7 +30,7 @@ func DecodeList(data []byte) ([]Item, error) {
 		return nil, err
 	}
 	if !item.IsList {
-		return nil, errors.New("rlp: expected list")
+		return nil, ce.NewContractError(ce.ErrInput, "rlp: expected list")
 	}
 	return item.Children, nil
 }
@@ -154,7 +156,7 @@ func decodeChildren(data []byte, start, end, depth int) ([]Item, error) {
 		pos = nextPos
 	}
 	if pos != end {
-		return nil, errors.New("rlp: list length mismatch")
+		return nil, ce.NewContractError(ce.ErrInput, "rlp: list length mismatch")
 	}
 	return children, nil
 }

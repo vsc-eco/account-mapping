@@ -1,9 +1,9 @@
 package mapping
 
 import (
-	"errors"
 	"evm-mapping-contract/contract/abi"
 	"evm-mapping-contract/contract/constants"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/rlp"
 	"evm-mapping-contract/sdk"
@@ -125,7 +125,7 @@ func ComputeSighash(unsignedTxWithPrefix []byte) []byte {
 // AttachSignature creates the final signed transaction from the unsigned tx and signature.
 func AttachSignature(unsignedTxWithPrefix []byte, v byte, r, s []byte) ([]byte, error) {
 	if len(unsignedTxWithPrefix) < 2 || unsignedTxWithPrefix[0] != 0x02 {
-		return nil, errors.New("not an EIP-1559 tx")
+		return nil, ce.NewContractError(ce.ErrInput, "not an EIP-1559 tx")
 	}
 
 	// Decode the unsigned list
@@ -134,7 +134,7 @@ func AttachSignature(unsignedTxWithPrefix []byte, v byte, r, s []byte) ([]byte, 
 		return nil, err
 	}
 	if len(items) != 9 {
-		return nil, errors.New("expected 9 unsigned fields")
+		return nil, ce.NewContractError(ce.ErrInput, "expected 9 unsigned fields")
 	}
 
 	// Re-encode with signature: 9 unsigned fields + v, r, s

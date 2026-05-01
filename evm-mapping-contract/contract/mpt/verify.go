@@ -2,16 +2,16 @@ package mpt
 
 import (
 	"bytes"
-	"errors"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/rlp"
 )
 
 var (
-	ErrInvalidProof  = errors.New("mpt: invalid proof")
-	ErrProofTooLong  = errors.New("mpt: proof exceeds max nodes")
-	ErrRootMismatch  = errors.New("mpt: root hash mismatch")
-	ErrKeyNotFound   = errors.New("mpt: key not found in proof")
+	ErrInvalidProof = ce.NewContractError(ce.ErrTransaction, "mpt: invalid proof")
+	ErrProofTooLong = ce.NewContractError(ce.ErrTransaction, "mpt: proof exceeds max nodes")
+	ErrRootMismatch = ce.NewContractError(ce.ErrTransaction, "mpt: root hash mismatch")
+	ErrKeyNotFound  = ce.NewContractError(ce.ErrTransaction, "mpt: key not found in proof")
 )
 
 const MaxProofNodes = 20

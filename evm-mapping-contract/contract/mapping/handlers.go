@@ -3,10 +3,10 @@ package mapping
 import (
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"evm-mapping-contract/contract/abi"
 	"evm-mapping-contract/contract/blocklist"
 	"evm-mapping-contract/contract/constants"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/mpt"
 	"evm-mapping-contract/contract/rlp"
@@ -17,10 +17,10 @@ import (
 
 func HandleMap(params *MapParams, vaultAddress [20]byte) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	if vaultAddress == ([20]byte{}) {
-		return errors.New("vault address not configured")
+		return ce.NewContractError(ce.ErrInitialization, "vault address not configured")
 	}
 
 	req := &params.TxData
@@ -34,10 +34,10 @@ func HandleMap(params *MapParams, vaultAddress [20]byte) error {
 
 		amount := new(big.Int).SetBytes(amountBytes)
 		if amount.Sign() <= 0 {
-			return errors.New("deposit amount must be positive")
+			return ce.NewContractError(ce.ErrInput, "deposit amount must be positive")
 		}
 		if !amount.IsInt64() || amount.Int64() <= 0 {
-			return errors.New("deposit amount exceeds safe int64 range")
+			return ce.NewContractError(ce.ErrArithmetic, "deposit amount exceeds safe int64 range")
 		}
 		amountInt64 := amount.Int64()
 
@@ -55,7 +55,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte) error {
 
 		if dest != "" {
 			if err := IncBalance(dest, "eth", amountInt64); err != nil {
-				return errors.New("balance overflow")
+				return ce.WrapContractError(ce.ErrArithmetic, err, "balance overflow")
 			}
 		}
 		TrackDeposit("eth", amountInt64, gasTax)
@@ -64,7 +64,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte) error {
 	case "erc20":
 		tokenAddr, err := crypto.HexToAddress(req.TokenAddress)
 		if err != nil {
-			return errors.New("invalid token address")
+			return ce.Prepend(err, "token address")
 		}
 
 		tokenInfo := getTokenInfo(tokenAddr)
@@ -79,30 +79,30 @@ func HandleMap(params *MapParams, vaultAddress [20]byte) error {
 
 		amount := new(big.Int).SetBytes(amountBytes)
 		if amount.Sign() <= 0 || !amount.IsInt64() || amount.Int64() <= 0 {
-			return errors.New("deposit amount invalid or exceeds safe range")
+			return ce.NewContractError(ce.ErrArithmetic, "deposit amount invalid or exceeds safe range")
 		}
 		amountInt64 := amount.Int64()
 
 		dest := routeDeposit(sender, params.Instructions, tokenInfo.Symbol, amountInt64)
 		if dest != "" {
 			if err := IncBalance(dest, tokenInfo.Symbol, amountInt64); err != nil {
-				return errors.New("balance overflow")
+				return ce.WrapContractError(ce.ErrArithmetic, err, "balance overflow")
 			}
 		}
 		TrackDeposit(tokenInfo.Symbol, amountInt64, 0)
 		return nil
 
 	default:
-		return errors.New("deposit_type must be 'eth' or 'erc20'")
+		return ce.NewContractError(ce.ErrInput, "deposit_type must be 'eth' or 'erc20'")
 	}
 }
 
 func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
 	if isPaused() {
-		return "", errors.New("contract is paused")
+		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	if HasPendingWithdrawal() {
-		return "", errors.New("withdrawal pending: wait for confirmation")
+		return "", ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
 	}
 
 	env := sdk.GetEnv()
@@ -110,38 +110,41 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return "", errors.New("invalid amount")
+		return "", ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 	if amount < constants.MinETHWithdrawal {
-		return "", errors.New("below minimum ETH withdrawal")
+		return "", ce.NewContractError(ce.ErrIntent, "below minimum ETH withdrawal")
 	}
 
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
-		return "", errors.New("invalid 'to' address")
+		return "", ce.Prepend(err, "'to' address")
 	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
-		return "", errors.New("no block headers available")
+		return "", ce.NewContractError(ce.ErrInitialization, "no block headers available")
 	}
 
 	gasReserve := getGasReserve()
 	if gasReserve < constants.MinGasReserve {
-		return "", errors.New("insufficient gas reserve")
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient gas reserve")
 	}
 
-	gasTipCap := uint64(2_000_000_000)                  // 2 gwei
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	fee, feeErr := safeCastGasFee(constants.ETHTransferGas, gasFeeCap)
+	gasTipCap := uint64(2_000_000_000) // 2 gwei
+	gasFeeCap, feeCapErr := safeMulAddU64(header.BaseFeePerGas, 2, gasTipCap)
+	if feeCapErr != nil {
+		return "", ce.Prepend(feeCapErr, "gas fee cap")
+	}
+	fee, feeErr := safeMulU64ToI64(constants.ETHTransferGas, gasFeeCap)
 	if feeErr != nil {
-		return "", errors.New("gas fee too high")
+		return "", ce.Prepend(feeErr, "gas fee")
 	}
 
 	if params.MaxFee != "" {
 		maxFee, _ := strconv.ParseInt(params.MaxFee, 10, 64)
 		if maxFee > 0 && fee > maxFee {
-			return "", errors.New("fee exceeds max_fee")
+			return "", ce.NewContractError(ce.ErrIntent, "fee exceeds max_fee")
 		}
 	}
 
@@ -151,7 +154,7 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		totalDeduct = amount
 	}
 	if GetBalance(caller, "eth") < totalDeduct {
-		return "", errors.New("insufficient balance")
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
 
 	nonce := GetPendingNonce()
@@ -165,7 +168,7 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	sdk.TssSignKey("primary", sighash)
 
 	if !DecBalance(caller, "eth", totalDeduct) {
-		return "", errors.New("insufficient balance")
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
 	TrackWithdrawal("eth", amount)
 
@@ -186,10 +189,10 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 
 func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
 	if isPaused() {
-		return "", errors.New("contract is paused")
+		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	if HasPendingWithdrawal() {
-		return "", errors.New("withdrawal pending: wait for confirmation")
+		return "", ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
 	}
 
 	env := sdk.GetEnv()
@@ -197,43 +200,46 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return "", errors.New("invalid amount")
+		return "", ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 	if params.TokenAddress == "" {
-		return "", errors.New("token_address required for ERC-20 withdrawal")
+		return "", ce.NewContractError(ce.ErrInput, "token_address required for ERC-20 withdrawal")
 	}
 	tokenAddr, err := crypto.HexToAddress(params.TokenAddress)
 	if err != nil {
-		return "", errors.New("invalid token_address")
+		return "", ce.Prepend(err, "token_address")
 	}
 	tokenInfo := getTokenInfo(tokenAddr)
 	if tokenInfo == nil {
 		return "", ErrInvalidToken
 	}
 	if amount < tokenInfo.MinWithdrawal {
-		return "", errors.New("below minimum withdrawal for this token")
+		return "", ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
 	}
 
 	recipientAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
-		return "", errors.New("invalid recipient address")
+		return "", ce.Prepend(err, "recipient address")
 	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
-		return "", errors.New("no block headers available")
+		return "", ce.NewContractError(ce.ErrInitialization, "no block headers available")
 	}
 
 	gasReserve := getGasReserve()
 	if gasReserve < constants.MinGasReserve {
-		return "", errors.New("insufficient gas reserve for ERC-20 withdrawal")
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient gas reserve for ERC-20 withdrawal")
 	}
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	gasCost, gasCostErr := safeCastGasFee(constants.ERC20TransferGas, gasFeeCap)
+	gasFeeCap, feeCapErr := safeMulAddU64(header.BaseFeePerGas, 2, gasTipCap)
+	if feeCapErr != nil {
+		return "", ce.Prepend(feeCapErr, "gas fee cap")
+	}
+	gasCost, gasCostErr := safeMulU64ToI64(constants.ERC20TransferGas, gasFeeCap)
 	if gasCostErr != nil {
-		return "", errors.New("gas fee too high")
+		return "", ce.Prepend(gasCostErr, "gas fee")
 	}
 
 	nonce := GetPendingNonce()
@@ -247,7 +253,7 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	sdk.TssSignKey("primary", sighash)
 
 	if !DecBalance(caller, tokenInfo.Symbol, amount) {
-		return "", errors.New("insufficient token balance")
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient token balance")
 	}
 	TrackWithdrawal(tokenInfo.Symbol, amount)
 
@@ -270,17 +276,17 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 
 func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 
 	confirmedNonce := GetConfirmedNonce()
 	ps := GetPendingSpend(confirmedNonce)
 	if ps == nil {
-		return errors.New("no pending spend at confirmed nonce")
+		return ce.NewContractError(ce.ErrIntent, "no pending spend at confirmed nonce")
 	}
 
 	if req.BlockHeight <= ps.BlockHeight {
-		return errors.New("confirmation block must be after withdrawal block")
+		return ce.NewContractError(ce.ErrIntent, "confirmation block must be after withdrawal block")
 	}
 
 	header := blocklist.GetHeader(req.BlockHeight)
@@ -291,110 +297,110 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId
 	// --- Transaction proof: verify the tx matches the pending spend ---
 	txBytes, err := hex.DecodeString(req.TxHex)
 	if err != nil {
-		return errors.New("invalid tx_hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_hex")
 	}
 	txProofBytes, err := hex.DecodeString(req.TxProofHex)
 	if err != nil {
-		return errors.New("invalid tx_proof_hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_proof_hex")
 	}
 
 	txProof := splitProofNodes(txProofBytes)
 	txKey := rlp.EncodeUint64(req.TxIndex)
 	provenTx, err := mpt.VerifyProof(header.TransactionsRoot, txKey, txProof)
 	if err != nil {
-		return errors.New("tx proof verification failed")
+		return ce.Prepend(err, "tx proof")
 	}
 	if !bytesEqual(provenTx, txBytes) {
-		return errors.New("tx does not match proof")
+		return ce.NewContractError(ce.ErrTransaction, "tx does not match proof")
 	}
 
 	parsedTx, err := parseTransaction(txBytes)
 	if err != nil {
-		return errors.New("failed to parse proven tx: " + err.Error())
+		return ce.Prepend(err, "parse proven tx")
 	}
 	if parsedTx.Nonce != ps.Nonce {
-		return errors.New("tx nonce does not match pending spend")
+		return ce.NewContractError(ce.ErrTransaction, "tx nonce does not match pending spend")
 	}
 	if parsedTx.ChainId != chainId {
-		return errors.New("tx chain id does not match contract chain id")
+		return ce.NewContractError(ce.ErrTransaction, "tx chain id does not match contract chain id")
 	}
 
 	// Recover sender — the only valid signer of the vault's nonces is the vault itself.
 	sighash := computeTxSighash(txBytes, parsedTx)
 	recoveredSender, err := crypto.Ecrecover(sighash, 27+parsedTx.V, padTo32(parsedTx.R), padTo32(parsedTx.S))
 	if err != nil {
-		return errors.New("ecrecover failed: " + err.Error())
+		return ce.Prepend(err, "ecrecover")
 	}
 	if recoveredSender == ([20]byte{}) {
-		return errors.New("ecrecover returned zero address")
+		return ce.NewContractError(ce.ErrTransaction, "ecrecover returned zero address")
 	}
 	if recoveredSender != vaultAddress {
-		return errors.New("tx not signed by vault")
+		return ce.NewContractError(ce.ErrTransaction, "tx not signed by vault")
 	}
 
 	psTo, err := crypto.HexToAddress(ps.To)
 	if err != nil {
-		return errors.New("invalid pending spend destination")
+		return ce.Prepend(err, "pending spend destination")
 	}
 	if ps.Asset == "eth" {
 		if parsedTx.To != psTo {
-			return errors.New("tx destination does not match pending spend")
+			return ce.NewContractError(ce.ErrTransaction, "tx destination does not match pending spend")
 		}
 		txAmount := new(big.Int).SetBytes(parsedTx.Value)
 		if !txAmount.IsInt64() || txAmount.Int64() != ps.Amount {
-			return errors.New("tx amount does not match pending spend")
+			return ce.NewContractError(ce.ErrTransaction, "tx amount does not match pending spend")
 		}
 	} else {
 		// ERC-20: tx.to is the token contract, value is 0, calldata is transfer(recipient, amount).
 		tokenAddr, err := crypto.HexToAddress(ps.TokenAddress)
 		if err != nil {
-			return errors.New("invalid pending spend token address")
+			return ce.Prepend(err, "pending spend token address")
 		}
 		if parsedTx.To != tokenAddr {
-			return errors.New("tx token contract does not match pending spend")
+			return ce.NewContractError(ce.ErrTransaction, "tx token contract does not match pending spend")
 		}
 		if new(big.Int).SetBytes(parsedTx.Value).Sign() != 0 {
-			return errors.New("erc20 tx must have zero value")
+			return ce.NewContractError(ce.ErrTransaction, "erc20 tx must have zero value")
 		}
 		if len(parsedTx.Data) != 68 {
-			return errors.New("erc20 calldata must be 68 bytes")
+			return ce.NewContractError(ce.ErrTransaction, "erc20 calldata must be 68 bytes")
 		}
 		if !bytesEqual(parsedTx.Data[0:4], abi.TransferSelector) {
-			return errors.New("erc20 calldata selector mismatch")
+			return ce.NewContractError(ce.ErrTransaction, "erc20 calldata selector mismatch")
 		}
 		// First 12 bytes of address slot must be zero (left-padded address).
 		for _, b := range parsedTx.Data[4:16] {
 			if b != 0 {
-				return errors.New("erc20 recipient padding non-zero")
+				return ce.NewContractError(ce.ErrTransaction, "erc20 recipient padding non-zero")
 			}
 		}
 		if !bytesEqual(parsedTx.Data[16:36], psTo[:]) {
-			return errors.New("erc20 recipient does not match pending spend")
+			return ce.NewContractError(ce.ErrTransaction, "erc20 recipient does not match pending spend")
 		}
 		callAmount := new(big.Int).SetBytes(parsedTx.Data[36:68])
 		if !callAmount.IsInt64() || callAmount.Int64() != ps.Amount {
-			return errors.New("erc20 amount does not match pending spend")
+			return ce.NewContractError(ce.ErrTransaction, "erc20 amount does not match pending spend")
 		}
 	}
 
 	// --- Receipt proof: determine success or failure ---
 	receiptBytes, err := hex.DecodeString(req.ReceiptHex)
 	if err != nil {
-		return errors.New("invalid receipt_hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_hex")
 	}
 	receiptProofBytes, err := hex.DecodeString(req.ReceiptProofHex)
 	if err != nil {
-		return errors.New("invalid receipt_proof_hex")
+		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_proof_hex")
 	}
 
 	receiptProof := splitProofNodes(receiptProofBytes)
 	receiptKey := rlp.EncodeUint64(req.TxIndex)
 	provenReceipt, err := mpt.VerifyProof(header.ReceiptsRoot, receiptKey, receiptProof)
 	if err != nil {
-		return errors.New("receipt proof verification failed")
+		return ce.Prepend(err, "receipt proof")
 	}
 	if !bytesEqual(provenReceipt, receiptBytes) {
-		return errors.New("receipt does not match proof")
+		return ce.NewContractError(ce.ErrTransaction, "receipt does not match proof")
 	}
 
 	receiptToParse := receiptBytes
@@ -403,7 +409,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId
 	}
 	items, err := rlp.DecodeList(receiptToParse)
 	if err != nil || len(items) < 1 {
-		return errors.New("invalid receipt RLP")
+		return ce.NewContractError(ce.ErrInput, "invalid receipt RLP")
 	}
 	status := items[0].AsUint64()
 
@@ -430,62 +436,62 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId
 
 func HandleTransfer(params *TransferParams) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
 	if !DecBalance(caller, params.Asset, amount) {
-		return errors.New("insufficient balance")
+		return ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
 	if err := IncBalance(params.To, params.Asset, amount); err != nil {
-		return errors.New("recipient balance overflow")
+		return ce.WrapContractError(ce.ErrArithmetic, err, "recipient balance overflow")
 	}
 	return nil
 }
 
 func HandleTransferFrom(params *TransferParams) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
 	allowance := GetAllowance(params.From, caller, params.Asset)
 	if allowance < amount {
-		return errors.New("insufficient allowance")
+		return ce.NewContractError(ce.ErrBalance, "insufficient allowance")
 	}
 
 	if !DecBalance(params.From, params.Asset, amount) {
-		return errors.New("insufficient balance")
+		return ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
 	SetAllowance(params.From, caller, params.Asset, allowance-amount)
 	if err := IncBalance(params.To, params.Asset, amount); err != nil {
-		return errors.New("recipient balance overflow")
+		return ce.WrapContractError(ce.ErrArithmetic, err, "recipient balance overflow")
 	}
 	return nil
 }
 
 func HandleApprove(params *AllowanceParams) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount < 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
 	SetAllowance(caller, params.Spender, params.Asset, amount)
@@ -588,7 +594,7 @@ func RegisterToken(addr [20]byte, symbol string, decimals uint8, minWithdrawal i
 func requireTssKey() error {
 	keyInfo := sdk.TssGetKey("primary")
 	if keyInfo == "" || keyInfo == "fail" {
-		return errors.New("TSS key not available")
+		return ce.NewContractError(ce.ErrAuth, "TSS key not available")
 	}
 	return nil
 }
@@ -619,10 +625,10 @@ func deductGasReserve(amount int64) {
 
 func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	if HasPendingWithdrawal() {
-		return errors.New("withdrawal pending: wait for confirmation")
+		return ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
 	}
 
 	env := sdk.GetEnv()
@@ -630,10 +636,10 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 	if params.Asset == "eth" && amount < constants.MinETHWithdrawal {
-		return errors.New("below minimum ETH withdrawal")
+		return ce.NewContractError(ce.ErrIntent, "below minimum ETH withdrawal")
 	}
 
 	if err := requireTssKey(); err != nil {
@@ -643,49 +649,52 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	// Validate ALL inputs BEFORE any state mutations
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
-		return errors.New("invalid destination address")
+		return ce.Prepend(err, "destination address")
 	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
-		return errors.New("no block headers available")
+		return ce.NewContractError(ce.ErrInitialization, "no block headers available")
 	}
 
 	var tokenAddr [20]byte
 	if params.Asset != "eth" {
 		if params.TokenAddress == "" {
-			return errors.New("token_address required")
+			return ce.NewContractError(ce.ErrInput, "token_address required")
 		}
 		tokenAddr, err = crypto.HexToAddress(params.TokenAddress)
 		if err != nil {
-			return errors.New("invalid token_address")
+			return ce.Prepend(err, "token_address")
 		}
 		tokenInfo := getTokenInfo(tokenAddr)
 		if tokenInfo == nil {
 			return ErrInvalidToken
 		}
 		if amount < tokenInfo.MinWithdrawal {
-			return errors.New("below minimum withdrawal for this token")
+			return ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
 		}
 		if getGasReserve() < constants.MinGasReserve {
-			return errors.New("insufficient gas reserve for ERC-20 withdrawal")
+			return ce.NewContractError(ce.ErrBalance, "insufficient gas reserve for ERC-20 withdrawal")
 		}
 	}
 
 	allowance := GetAllowance(params.From, caller, params.Asset)
 	if allowance < amount {
-		return errors.New("insufficient allowance")
+		return ce.NewContractError(ce.ErrBalance, "insufficient allowance")
 	}
 
 	// All validation passed — now mutate state
 	if !DecBalance(params.From, params.Asset, amount) {
-		return errors.New("insufficient balance in owner account")
+		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
 	}
 	SetAllowance(params.From, caller, params.Asset, allowance-amount)
 	TrackWithdrawal(params.Asset, amount)
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
+	gasFeeCap, feeCapErr := safeMulAddU64(header.BaseFeePerGas, 2, gasTipCap)
+	if feeCapErr != nil {
+		ce.Abort(ce.ErrArithmetic, "gas fee cap overflow", "unmapFrom")
+	}
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
 
@@ -699,9 +708,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		unsigned = BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, amountBig)
 		asset = params.Asset
 		tokenAddress = params.TokenAddress
-		erc20Gas, erc20GasErr := safeCastGasFee(constants.ERC20TransferGas, gasFeeCap)
+		erc20Gas, erc20GasErr := safeMulU64ToI64(constants.ERC20TransferGas, gasFeeCap)
 		if erc20GasErr != nil {
-			sdk.Revert("gas fee too high", "unmapFrom")
+			ce.Abort(ce.ErrArithmetic, "gas fee too high", "unmapFrom")
 		}
 		deductGasReserve(erc20Gas)
 	}
@@ -725,20 +734,20 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 
 func HandleIncreaseAllowance(params *AllowanceParams) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
 	current := GetAllowance(caller, params.Spender, params.Asset)
 	newVal, err := safeAdd64(current, amount)
 	if err != nil {
-		return errors.New("allowance overflow")
+		return ce.WrapContractError(ce.ErrArithmetic, err, "allowance overflow")
 	}
 	SetAllowance(caller, params.Spender, params.Asset, newVal)
 	return nil
@@ -746,14 +755,14 @@ func HandleIncreaseAllowance(params *AllowanceParams) error {
 
 func HandleDecreaseAllowance(params *AllowanceParams) error {
 	if isPaused() {
-		return errors.New("contract is paused")
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
 
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
-		return errors.New("invalid amount")
+		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
 	current := GetAllowance(caller, params.Spender, params.Asset)
@@ -769,19 +778,23 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) {
 	confirmedNonce := GetConfirmedNonce()
 	ps := GetPendingSpend(confirmedNonce)
 	if ps == nil {
-		sdk.Revert("no pending withdrawal to replace", "replaceWithdrawal")
+		ce.Abort(ce.ErrIntent, "no pending withdrawal to replace", "replaceWithdrawal")
 		return
 	}
 
 	// Rebuild with 2x gas
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
-		sdk.Revert("no headers", "replaceWithdrawal")
+		ce.Abort(ce.ErrInitialization, "no headers", "replaceWithdrawal")
 		return
 	}
 
 	gasTipCap := uint64(4_000_000_000) // doubled
-	gasFeeCap := header.BaseFeePerGas*3 + gasTipCap
+	gasFeeCap, feeCapErr := safeMulAddU64(header.BaseFeePerGas, 3, gasTipCap)
+	if feeCapErr != nil {
+		ce.Abort(ce.ErrArithmetic, "gas fee cap overflow", "replaceWithdrawal")
+		return
+	}
 
 	toAddr, _ := crypto.HexToAddress(ps.To)
 	amountBig := new(big.Int).SetInt64(ps.Amount)
@@ -806,7 +819,7 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64) {
 	confirmedNonce := GetConfirmedNonce()
 	ps := GetPendingSpend(confirmedNonce)
 	if ps == nil {
-		sdk.Revert("no pending nonce to clear", "clearNonce")
+		ce.Abort(ce.ErrIntent, "no pending nonce to clear", "clearNonce")
 		return
 	}
 
