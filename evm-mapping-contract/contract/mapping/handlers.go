@@ -133,7 +133,10 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 
 	gasTipCap := uint64(2_000_000_000)                  // 2 gwei
 	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	fee := int64(constants.ETHTransferGas * gasFeeCap)
+	fee, feeErr := safeCastGasFee(constants.ETHTransferGas, gasFeeCap)
+	if feeErr != nil {
+		return "", errors.New("gas fee too high")
+	}
 
 	if params.MaxFee != "" {
 		maxFee, _ := strconv.ParseInt(params.MaxFee, 10, 64)
@@ -228,7 +231,10 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 
 	gasTipCap := uint64(2_000_000_000)
 	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	gasCost := int64(constants.ERC20TransferGas * gasFeeCap)
+	gasCost, gasCostErr := safeCastGasFee(constants.ERC20TransferGas, gasFeeCap)
+	if gasCostErr != nil {
+		return "", errors.New("gas fee too high")
+	}
 
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
@@ -318,6 +324,9 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId
 	recoveredSender, err := crypto.Ecrecover(sighash, 27+parsedTx.V, padTo32(parsedTx.R), padTo32(parsedTx.S))
 	if err != nil {
 		return errors.New("ecrecover failed: " + err.Error())
+	}
+	if recoveredSender == ([20]byte{}) {
+		return errors.New("ecrecover returned zero address")
 	}
 	if recoveredSender != vaultAddress {
 		return errors.New("tx not signed by vault")
@@ -690,7 +699,11 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		unsigned = BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, amountBig)
 		asset = params.Asset
 		tokenAddress = params.TokenAddress
-		deductGasReserve(int64(constants.ERC20TransferGas * gasFeeCap))
+		erc20Gas, erc20GasErr := safeCastGasFee(constants.ERC20TransferGas, gasFeeCap)
+		if erc20GasErr != nil {
+			sdk.Revert("gas fee too high", "unmapFrom")
+		}
+		deductGasReserve(erc20Gas)
 	}
 
 	sighash := ComputeSighash(unsigned)
