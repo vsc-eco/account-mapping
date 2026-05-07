@@ -280,6 +280,25 @@ func clearNonce(_ *string) *string {
 	return nil
 }
 
+//go:wasmexport cancelStuckWithdrawal
+//
+// Pentest finding EVM-C3: the previous design left the bridge
+// permanently jammed if the admin key was unavailable or the
+// oracle stopped feeding fresh base fees — clearNonce and
+// replaceWithdrawal were both checkAdmin-gated. This is the
+// permissionless escape hatch: anyone can cancel a pending
+// withdrawal that's older than mapping.CancelStuckTTLBlocks.
+// The TTL exceeds blocklist.MaxBlockRetention, so by the time
+// it fires the withdrawal can no longer be confirmed (no
+// header to verify against). Refunds the original sender,
+// advances the confirmed nonce.
+func cancelStuckWithdrawal(_ *string) *string {
+	if err := mapping.HandleCancelStuckWithdrawal(); err != nil {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
+	}
+	return nil
+}
+
 //go:wasmexport increaseAllowance
 func increaseAllowance(input *string) *string {
 	var params mapping.AllowanceParams
