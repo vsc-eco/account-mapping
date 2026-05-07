@@ -16,14 +16,47 @@ func Log(s string) {
 	log(&s)
 }
 
+// In-memory test state. The production wasm runtime persists each
+// contract's StateSetObject calls; the previous test stub silently
+// dropped them, so any handler that round-trips state through
+// StateSetObject + StateGetObject couldn't be exercised end-to-end
+// in unit tests. Persist them here so the contract can be driven
+// like a normal data structure.
+var testStateStore = map[string]string{}
+
+// ResetTestStateStore clears the in-memory state between tests
+// that need a clean slate.
+func ResetTestStateStore() {
+	testStateStore = map[string]string{}
+}
+
 //go:wasmimport sdk db.set_object
-func stateSetObject(key *string, value *string) *string { return nil }
+func stateSetObject(key *string, value *string) *string {
+	if key != nil && value != nil {
+		testStateStore[*key] = *value
+	}
+	return nil
+}
 
 //go:wasmimport sdk db.get_object
-func stateGetObject(key *string) *string { return nil }
+func stateGetObject(key *string) *string {
+	if key == nil {
+		return nil
+	}
+	v, ok := testStateStore[*key]
+	if !ok {
+		return nil
+	}
+	return &v
+}
 
 //go:wasmimport sdk db.rm_object
-func stateDeleteObject(key *string) *string { return nil }
+func stateDeleteObject(key *string) *string {
+	if key != nil {
+		delete(testStateStore, *key)
+	}
+	return nil
+}
 
 //go:wasmimport sdk ephem_db.set_object
 func ephemStateSetObject(key *string, value *string) *string { return nil }
@@ -34,11 +67,50 @@ func ephemStateGetObject(contractId *string, key *string) *string { return nil }
 //go:wasmimport sdk ephem_db.rm_object
 func ephemStateDeleteObject(key *string) *string { return nil }
 
+// Test stub env state. Tests that exercise checkOwner() / GetEnv()
+// can override these via the helpers below to drive caller and
+// per-key env lookups.
+var (
+	testEnvCaller = "hive:test_owner"
+	testEnvKeys   = map[string]string{
+		"contract.id":    "vsc1TestContract",
+		"contract.owner": "hive:test_owner",
+	}
+)
+
+// SetTestCaller overrides the caller returned by sdk.GetEnv() in
+// unit tests. Pair with SetTestEnvKey("contract.owner", ...) to
+// drive the checkOwner() path.
+func SetTestCaller(addr string) {
+	testEnvCaller = addr
+}
+
+// SetTestEnvKey sets a value for sdk.GetEnvKey(key) in unit tests.
+func SetTestEnvKey(key, value string) {
+	testEnvKeys[key] = value
+}
+
 //go:wasmimport sdk system.get_env
-func getEnv(arg *string) *string { return nil }
+func getEnv(arg *string) *string {
+	envJSON := `{"msg.sender":"` + testEnvCaller + `",` +
+		`"msg.caller":"` + testEnvCaller + `",` +
+		`"msg.required_auths":["` + testEnvCaller + `"],` +
+		`"msg.required_posting_auths":[],` +
+		`"contract.id":"` + testEnvKeys["contract.id"] + `"}`
+	return &envJSON
+}
 
 //go:wasmimport sdk system.get_env_key
-func getEnvKey(arg *string) *string { return nil }
+func getEnvKey(arg *string) *string {
+	if arg == nil {
+		return nil
+	}
+	v, ok := testEnvKeys[*arg]
+	if !ok {
+		return nil
+	}
+	return &v
+}
 
 //go:wasmimport sdk system.verify_address
 func verifyAddress(arg *string) *string { return nil }
@@ -125,5 +197,21 @@ func cryptoRlpDecode(hexData *string) *string { return nil }
 //go:wasmimport env abort
 func abort(msg, file *string, line, column *int32) { return }
 
+// In the production wasm runtime, revert halts contract execution
+// just like abort. The previous unit-test stub silently returned,
+// which made every ce.CustomAbort with a Symbol invisible to tests
+// and effectively let unit-test code continue past abort points.
+// Panic with the symbol-tagged message to mirror production halt
+// semantics so tests can observe (and recover from) the abort.
+//
 //go:wasmimport env revert
-func revert(msg, symbol *string) { return }
+func revert(msg, symbol *string) {
+	m := ""
+	if msg != nil {
+		m = *msg
+	}
+	if symbol != nil && *symbol != "" {
+		m = *symbol + ": " + m
+	}
+	panic(m)
+}

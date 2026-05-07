@@ -3,10 +3,29 @@ package blocklist
 import (
 	"encoding/hex"
 	"errors"
-	"evm-mapping-contract/contract/constants"
-	"evm-mapping-contract/sdk"
 	"strconv"
+	"strings"
+
+	"evm-mapping-contract/contract/constants"
+	"evm-mapping-contract/contract/crypto"
+	"evm-mapping-contract/sdk"
 )
+
+// keccak256Hex returns the lowercase hex-encoded keccak256 of data.
+// Used by HandleAddBlocks for parent-hash chain validation
+// (pentest finding EVM-C2).
+func keccak256Hex(data []byte) string {
+	h := crypto.Keccak256(data)
+	return hex.EncodeToString(h)
+}
+
+// equalHex compares two hex strings case-insensitively, ignoring
+// an optional leading "0x" on either side.
+func equalHex(a, b string) bool {
+	a = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(a)), "0x")
+	b = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(b)), "0x")
+	return a == b
+}
 
 type EthBlockHeader struct {
 	BlockNumber      uint64
@@ -111,6 +130,12 @@ type AddBlocksParams struct {
 
 type AddBlockEntry struct {
 	BlockNumber      uint64 `json:"block_number"`
+	// ParentHash is the keccak256 of the previous tip header's
+	// Serialize() output. Required on every non-seed entry —
+	// HandleAddBlocks rejects entries whose parent_hash doesn't
+	// match the stored previous tip's hash. See pentest finding
+	// EVM-C2.
+	ParentHash       string `json:"parent_hash"`
 	StateRoot        string `json:"state_root"`
 	TransactionsRoot string `json:"transactions_root"`
 	ReceiptsRoot     string `json:"receipts_root"`
@@ -129,6 +154,21 @@ func HandleAddBlocks(params *AddBlocksParams) error {
 	for _, entry := range params.Blocks {
 		if entry.BlockNumber != lastHeight+1 {
 			return errors.New("block heights must be sequential")
+		}
+
+		// EVM-C2: chain-link validation. Each entry's parent_hash
+		// must equal keccak256(serialize(prev tip)). Without this
+		// check, the contract stores oracle-supplied headers
+		// verbatim — a 2/3 BLS-quorum compromise (or any single
+		// oracle that can produce one fake header) can fork the
+		// chain in this contract's view.
+		prev := GetHeader(lastHeight)
+		if prev == nil {
+			return errors.New("previous tip header missing")
+		}
+		expectedParent := keccak256Hex([]byte(prev.Serialize()))
+		if !equalHex(entry.ParentHash, expectedParent) {
+			return errors.New("parent_hash mismatch: header does not chain to previous tip")
 		}
 
 		stateRoot, err := hexTo32(entry.StateRoot)

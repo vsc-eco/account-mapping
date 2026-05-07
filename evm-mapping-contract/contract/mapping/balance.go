@@ -8,6 +8,17 @@ import (
 	"strconv"
 )
 
+func safeCastGasFee(gas uint64, feeCap uint64) (int64, error) {
+	product := gas * feeCap
+	if feeCap != 0 && product/feeCap != gas {
+		return 0, errors.New("gas fee overflow")
+	}
+	if product > uint64(math.MaxInt64) {
+		return 0, errors.New("gas fee exceeds max int64")
+	}
+	return int64(product), nil
+}
+
 func safeAdd64(a, b int64) (int64, error) {
 	if a > 0 && b > math.MaxInt64-a {
 		return 0, errors.New("overflow")
