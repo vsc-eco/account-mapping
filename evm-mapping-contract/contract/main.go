@@ -48,6 +48,22 @@ func checkAdmin() {
 	}
 }
 
+// unmarshalParams is the canonical wasmexport unmarshal step.
+// Pentest finding F2: every wasmexport in this file used to call
+// json.Unmarshal and discard the error, which let garbage JSON
+// silently produce a zero-valued struct that the handler then
+// ran on. This helper aborts the contract with an ErrJson-tagged
+// ContractError so callers can tell parse errors apart from
+// business-logic errors.
+func unmarshalParams(input *string, dest interface{}) {
+	if input == nil {
+		ce.CustomAbort(ce.NewContractError(ce.ErrJson, "payload required"))
+	}
+	if err := json.Unmarshal([]byte(*input), dest); err != nil {
+		ce.CustomAbort(ce.WrapContractError(ce.ErrJson, err))
+	}
+}
+
 func checkOwner() {
 	caller := sdk.GetEnv().Caller.String()
 	owner := sdk.GetEnvKey("contract.owner")
@@ -60,7 +76,7 @@ func checkOwner() {
 func addBlocks(input *string) *string {
 	checkAdmin()
 	var params blocklist.AddBlocksParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := blocklist.HandleAddBlocks(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -70,7 +86,7 @@ func addBlocks(input *string) *string {
 //go:wasmexport map
 func mapDeposit(input *string) *string {
 	var params mapping.MapParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleMap(&params, vault()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -80,7 +96,7 @@ func mapDeposit(input *string) *string {
 //go:wasmexport unmapETH
 func unmapETH(input *string) *string {
 	var params mapping.TransferParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if _, err := mapping.HandleUnmapETH(&params, vault(), chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -90,7 +106,7 @@ func unmapETH(input *string) *string {
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if _, err := mapping.HandleUnmapERC20(&params, vault(), chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -100,7 +116,7 @@ func unmapERC20(input *string) *string {
 //go:wasmexport confirmSpend
 func confirmSpend(input *string) *string {
 	var req mapping.ConfirmSpendRequest
-	json.Unmarshal([]byte(*input), &req)
+	unmarshalParams(input, &req)
 	if err := mapping.HandleConfirmSpend(&req, vault(), chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -110,7 +126,7 @@ func confirmSpend(input *string) *string {
 //go:wasmexport transfer
 func transfer(input *string) *string {
 	var params mapping.TransferParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleTransfer(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -120,7 +136,7 @@ func transfer(input *string) *string {
 //go:wasmexport transferFrom
 func transferFrom(input *string) *string {
 	var params mapping.TransferParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleTransferFrom(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -130,7 +146,7 @@ func transferFrom(input *string) *string {
 //go:wasmexport approve
 func approve(input *string) *string {
 	var params mapping.AllowanceParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleApprove(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -141,7 +157,7 @@ func approve(input *string) *string {
 func registerToken(input *string) *string {
 	checkOwner()
 	var params mapping.RegisterTokenParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	addr, err := crypto.HexToAddress(params.Address)
 	if err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "invalid address"))
@@ -184,7 +200,7 @@ func setVerifierContract(input *string) *string {
 	var params struct {
 		ContractId string `json:"contract_id"`
 	}
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	sdk.StateSetObject(constants.VerifierContractIdKey, params.ContractId)
 	return nil
 }
@@ -197,7 +213,7 @@ func adminMint(input *string) *string {
 		Asset   string `json:"asset"`
 		Amount  int64  `json:"amount"`
 	}
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if params.Amount <= 0 || params.Address == "" || params.Asset == "" {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "address, asset, and positive amount required"))
 	}
@@ -218,7 +234,7 @@ func setGasReserve(input *string) *string {
 func replaceBlock(input *string) *string {
 	checkAdmin()
 	var params blocklist.AddBlockEntry
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := blocklist.HandleReplaceBlock(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -228,7 +244,7 @@ func replaceBlock(input *string) *string {
 //go:wasmexport unmapFrom
 func unmapFrom(input *string) *string {
 	var params mapping.TransferParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleUnmapFrom(&params, vault(), chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -252,7 +268,7 @@ func clearNonce(_ *string) *string {
 //go:wasmexport increaseAllowance
 func increaseAllowance(input *string) *string {
 	var params mapping.AllowanceParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleIncreaseAllowance(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -262,7 +278,7 @@ func increaseAllowance(input *string) *string {
 //go:wasmexport decreaseAllowance
 func decreaseAllowance(input *string) *string {
 	var params mapping.AllowanceParams
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := mapping.HandleDecreaseAllowance(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
@@ -290,7 +306,7 @@ func seedBlocks(input *string) *string {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "seedBlocks only allowed when h=0"))
 	}
 	var params blocklist.AddBlockEntry
-	json.Unmarshal([]byte(*input), &params)
+	unmarshalParams(input, &params)
 	if err := blocklist.HandleSeedBlock(&params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}

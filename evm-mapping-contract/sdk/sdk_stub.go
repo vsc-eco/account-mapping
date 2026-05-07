@@ -125,5 +125,21 @@ func cryptoRlpDecode(hexData *string) *string { return nil }
 //go:wasmimport env abort
 func abort(msg, file *string, line, column *int32) { return }
 
+// In the production wasm runtime, revert halts contract execution
+// just like abort. The previous unit-test stub silently returned,
+// which made every ce.CustomAbort with a Symbol invisible to tests
+// and effectively let unit-test code continue past abort points.
+// Panic with the symbol-tagged message to mirror production halt
+// semantics so tests can observe (and recover from) the abort.
+//
 //go:wasmimport env revert
-func revert(msg, symbol *string) { return }
+func revert(msg, symbol *string) {
+	m := ""
+	if msg != nil {
+		m = *msg
+	}
+	if symbol != nil && *symbol != "" {
+		m = *symbol + ": " + m
+	}
+	panic(m)
+}
