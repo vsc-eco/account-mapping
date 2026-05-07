@@ -67,11 +67,50 @@ func ephemStateGetObject(contractId *string, key *string) *string { return nil }
 //go:wasmimport sdk ephem_db.rm_object
 func ephemStateDeleteObject(key *string) *string { return nil }
 
+// Test stub env state. Tests that exercise checkOwner() / GetEnv()
+// can override these via the helpers below to drive caller and
+// per-key env lookups.
+var (
+	testEnvCaller = "hive:test_owner"
+	testEnvKeys   = map[string]string{
+		"contract.id":    "vsc1TestContract",
+		"contract.owner": "hive:test_owner",
+	}
+)
+
+// SetTestCaller overrides the caller returned by sdk.GetEnv() in
+// unit tests. Pair with SetTestEnvKey("contract.owner", ...) to
+// drive the checkOwner() path.
+func SetTestCaller(addr string) {
+	testEnvCaller = addr
+}
+
+// SetTestEnvKey sets a value for sdk.GetEnvKey(key) in unit tests.
+func SetTestEnvKey(key, value string) {
+	testEnvKeys[key] = value
+}
+
 //go:wasmimport sdk system.get_env
-func getEnv(arg *string) *string { return nil }
+func getEnv(arg *string) *string {
+	envJSON := `{"msg.sender":"` + testEnvCaller + `",` +
+		`"msg.caller":"` + testEnvCaller + `",` +
+		`"msg.required_auths":["` + testEnvCaller + `"],` +
+		`"msg.required_posting_auths":[],` +
+		`"contract.id":"` + testEnvKeys["contract.id"] + `"}`
+	return &envJSON
+}
 
 //go:wasmimport sdk system.get_env_key
-func getEnvKey(arg *string) *string { return nil }
+func getEnvKey(arg *string) *string {
+	if arg == nil {
+		return nil
+	}
+	v, ok := testEnvKeys[*arg]
+	if !ok {
+		return nil
+	}
+	return &v
+}
 
 //go:wasmimport sdk system.verify_address
 func verifyAddress(arg *string) *string { return nil }

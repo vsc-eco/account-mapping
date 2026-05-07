@@ -195,8 +195,23 @@ func registerRouter(input *string) *string {
 }
 
 //go:wasmexport setVerifierContract
+//
+// Pentest finding EVM-C1: previously this accepted any string with
+// no timelock, multisig, or target validation, and would silently
+// overwrite an existing verifier on every call. A single owner-key
+// compromise could redirect the bridge to an attacker-controlled
+// verifier contract → arbitrary fake headers → fake deposits →
+// drain the vault.
+//
+// The verifier is now immutable after first set: changing it
+// requires redeploying the mapping contract. Owner-only first
+// write is still allowed.
 func setVerifierContract(input *string) *string {
 	checkOwner()
+	if existing := sdk.StateGetObject(constants.VerifierContractIdKey); existing != nil && *existing != "" {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInitialization,
+			"verifier contract is immutable once set; redeploy to change"))
+	}
 	var params struct {
 		ContractId string `json:"contract_id"`
 	}
