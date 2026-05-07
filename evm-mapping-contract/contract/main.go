@@ -328,4 +328,14 @@ func unpause(_ *string) *string {
 }
 
 //go:wasmexport getInfo
-func getInfo(_ *string) *string { return nil }
+//
+// Pentest finding F3: previously returned nil, which broke
+// `register_token` on the DEX router (and any other contract that
+// queries the bridge for asset metadata). The router expects a
+// JSON {"name":"Ether","symbol":"ETH","decimals":"18"} for the
+// primary mapping; matches the BTC mapping contract's getInfo
+// shape and the dex-contracts/types.MappingContractInfoReturn.
+func getInfo(_ *string) *string {
+	info := `{"name":"Ether","symbol":"ETH","decimals":"18"}`
+	return &info
+}
