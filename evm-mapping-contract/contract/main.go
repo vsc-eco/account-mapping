@@ -216,6 +216,13 @@ func setVerifierContract(input *string) *string {
 		ContractId string `json:"contract_id"`
 	}
 	unmarshalParams(input, &params)
+	// Pentest finding EVM-C8: an empty verifier id silently regresses
+	// readState back to BLS-oracle headers (or nothing). Reject so
+	// the verifier can only ever land on a real, non-empty id.
+	if params.ContractId == "" {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput,
+			"verifier contract_id must be non-empty"))
+	}
 	sdk.StateSetObject(constants.VerifierContractIdKey, params.ContractId)
 	return nil
 }
