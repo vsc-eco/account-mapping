@@ -31,11 +31,25 @@ func VerifyProof(root [32]byte, key []byte, proof [][]byte) ([]byte, error) {
 	expectedHash := root[:]
 
 	for i, nodeRLP := range proof {
-		// Verify this node's hash matches what the parent pointed to
-		nodeHash := crypto.Keccak256(nodeRLP)
-		if !bytes.Equal(nodeHash, expectedHash) {
-			// For inline nodes (< 32 bytes), the node IS the reference, not its hash
-			if len(nodeRLP) >= 32 || i == 0 {
+		// Pentest finding EVM-C6: inline nodes (< 32 bytes that are
+		// not the root) are referenced by their raw bytes, not by
+		// their keccak256 hash. The previous code SKIPPED the hash
+		// check entirely in that case, allowing an attacker who
+		// could craft any RLP-valid short alternative to substitute
+		// it freely.
+		//
+		// What the parent actually committed to is recorded in
+		// expectedHash: 32 bytes for a hash reference, fewer bytes
+		// for an inline reference. The check switches on that
+		// length, NOT on the length of nodeRLP — the parent's
+		// commitment is what defines the rule.
+		if i > 0 && len(expectedHash) < 32 {
+			if !bytes.Equal(nodeRLP, expectedHash) {
+				return nil, ErrRootMismatch
+			}
+		} else {
+			nodeHash := crypto.Keccak256(nodeRLP)
+			if !bytes.Equal(nodeHash, expectedHash) {
 				return nil, ErrRootMismatch
 			}
 		}
