@@ -262,6 +262,7 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		TokenAddress: params.TokenAddress,
 		UnsignedTxHex:  hex.EncodeToString(unsigned),
 		BlockHeight:  blocklist.GetLastHeight(),
+		GasCost:      gasCost, // refunded on failed receipt; pentest finding EVM-C4
 	})
 	SetPendingNonce(nonce + 1)
 
@@ -420,6 +421,14 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, vaultAddress [20]byte, chainId
 			s.Active += ps.Amount
 			s.User += ps.Amount
 			SetSupply(ps.Asset, s)
+		}
+		// Pentest finding EVM-C4: previously the gas reserve that
+		// was charged at unmap time was never refunded on a failed
+		// receipt. ~383 failed ERC-20 withdrawals would exhaust
+		// 0.05 ETH and then block ALL withdrawals. Restore the
+		// reserve so the bridge keeps working.
+		if ps.GasCost > 0 {
+			addGasReserve(ps.GasCost)
 		}
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
@@ -692,6 +701,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	var unsigned []byte
 	var asset string
 	var tokenAddress string
+	var deductedGas int64
 	if params.Asset == "eth" {
 		unsigned = BuildETHWithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, toAddr, amountBig)
 		asset = "eth"
@@ -704,6 +714,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 			sdk.Revert("gas fee too high", "unmapFrom")
 		}
 		deductGasReserve(erc20Gas)
+		deductedGas = erc20Gas
 	}
 
 	sighash := ComputeSighash(unsigned)
@@ -718,6 +729,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		TokenAddress: tokenAddress,
 		UnsignedTxHex:  hex.EncodeToString(unsigned),
 		BlockHeight:  blocklist.GetLastHeight(),
+		GasCost:      deductedGas, // refunded on failed receipt; pentest finding EVM-C4
 	})
 	SetPendingNonce(nonce + 1)
 	return nil

@@ -50,6 +50,11 @@ type PendingSpend struct {
 	TokenAddress string
 	UnsignedTxHex  string
 	BlockHeight  uint64
+	// GasCost is the amount deducted from the gas reserve when
+	// this withdrawal was submitted. Refunded by
+	// HandleConfirmSpend's failure branch (pentest finding EVM-C4).
+	// Zero for legacy entries that pre-date the field.
+	GasCost int64
 }
 
 func StorePendingSpend(ps PendingSpend) {
@@ -58,7 +63,8 @@ func StorePendingSpend(ps PendingSpend) {
 		strconv.FormatInt(ps.Amount, 10) + "|" +
 		ps.UnsignedTxHex + "|" +
 		strconv.FormatUint(ps.BlockHeight, 10) + "|" +
-		ps.TokenAddress
+		ps.TokenAddress + "|" +
+		strconv.FormatInt(ps.GasCost, 10)
 	sdk.StateSetObject(key, data)
 }
 
@@ -81,6 +87,9 @@ func GetPendingSpend(nonce uint64) *PendingSpend {
 	ps.BlockHeight, _ = strconv.ParseUint(fields[5], 10, 64)
 	if len(fields) >= 7 {
 		ps.TokenAddress = fields[6]
+	}
+	if len(fields) >= 8 {
+		ps.GasCost, _ = strconv.ParseInt(fields[7], 10, 64)
 	}
 	return ps
 }
