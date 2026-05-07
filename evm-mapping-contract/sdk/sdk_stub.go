@@ -16,14 +16,47 @@ func Log(s string) {
 	log(&s)
 }
 
+// In-memory test state. The production wasm runtime persists each
+// contract's StateSetObject calls; the previous test stub silently
+// dropped them, so any handler that round-trips state through
+// StateSetObject + StateGetObject couldn't be exercised end-to-end
+// in unit tests. Persist them here so the contract can be driven
+// like a normal data structure.
+var testStateStore = map[string]string{}
+
+// ResetTestStateStore clears the in-memory state between tests
+// that need a clean slate.
+func ResetTestStateStore() {
+	testStateStore = map[string]string{}
+}
+
 //go:wasmimport sdk db.set_object
-func stateSetObject(key *string, value *string) *string { return nil }
+func stateSetObject(key *string, value *string) *string {
+	if key != nil && value != nil {
+		testStateStore[*key] = *value
+	}
+	return nil
+}
 
 //go:wasmimport sdk db.get_object
-func stateGetObject(key *string) *string { return nil }
+func stateGetObject(key *string) *string {
+	if key == nil {
+		return nil
+	}
+	v, ok := testStateStore[*key]
+	if !ok {
+		return nil
+	}
+	return &v
+}
 
 //go:wasmimport sdk db.rm_object
-func stateDeleteObject(key *string) *string { return nil }
+func stateDeleteObject(key *string) *string {
+	if key != nil {
+		delete(testStateStore, *key)
+	}
+	return nil
+}
 
 //go:wasmimport sdk ephem_db.set_object
 func ephemStateSetObject(key *string, value *string) *string { return nil }
