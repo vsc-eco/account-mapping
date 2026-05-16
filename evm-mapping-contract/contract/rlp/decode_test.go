@@ -1,6 +1,7 @@
 package rlp
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -117,7 +118,7 @@ func TestDecodeZero(t *testing.T) {
 func TestNonCanonicalSingleByte(t *testing.T) {
 	// 0x00 encoded as 0x8100 (should use single-byte form)
 	_, _, err := Decode([]byte{0x81, 0x00})
-	if err != ErrNonCanonical {
+	if !errors.Is(err, ErrNonCanonical) {
 		t.Fatalf("expected ErrNonCanonical, got %v", err)
 	}
 }

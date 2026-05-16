@@ -2,7 +2,7 @@ package crypto
 
 import (
 	"encoding/hex"
-	"errors"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"strings"
 
 	"evm-mapping-contract/sdk"
@@ -21,10 +21,10 @@ func Keccak256Hash(data []byte) [32]byte {
 func Ecrecover(hash []byte, v byte, r, s []byte) ([20]byte, error) {
 	var addr [20]byte
 	if len(hash) != 32 {
-		return addr, errors.New("hash must be 32 bytes")
+		return addr, ce.NewContractError(ce.ErrTransaction, "hash must be 32 bytes")
 	}
 	if len(r) != 32 || len(s) != 32 {
-		return addr, errors.New("r and s must be 32 bytes")
+		return addr, ce.NewContractError(ce.ErrTransaction, "r and s must be 32 bytes")
 	}
 
 	sig := make([]byte, 65)
@@ -38,10 +38,10 @@ func Ecrecover(hash []byte, v byte, r, s []byte) ([20]byte, error) {
 
 	recovered, err := sdk.Ecrecover(hash, sig)
 	if err != nil {
-		return addr, err
+		return addr, ce.WrapContractError(ce.ErrTransaction, err, "ecrecover")
 	}
 	if len(recovered) != 20 {
-		return addr, errors.New("ecrecover returned invalid address")
+		return addr, ce.NewContractError(ce.ErrTransaction, "ecrecover returned invalid address")
 	}
 	copy(addr[:], recovered)
 	return addr, nil
@@ -59,11 +59,11 @@ func HexToAddress(s string) ([20]byte, error) {
 	var addr [20]byte
 	s = strings.TrimPrefix(s, "0x")
 	if len(s) != 40 {
-		return addr, errors.New("invalid address length")
+		return addr, ce.NewContractError(ce.ErrInput, "invalid address length")
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil {
-		return addr, err
+		return addr, ce.WrapContractError(ce.ErrInvalidHex, err, "address decode")
 	}
 	copy(addr[:], b)
 	return addr, nil

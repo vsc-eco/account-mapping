@@ -2,6 +2,7 @@ package mpt
 
 import (
 	"bytes"
+	"errors"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/rlp"
 	"testing"
@@ -17,10 +18,10 @@ func TestKeyToNibbles(t *testing.T) {
 
 func TestCompactToNibbles(t *testing.T) {
 	tests := []struct {
-		name     string
-		compact  []byte
-		nibbles  []byte
-		isLeaf   bool
+		name    string
+		compact []byte
+		nibbles []byte
+		isLeaf  bool
 	}{
 		{"extension_even", []byte{0x00, 0xab}, []byte{0x0a, 0x0b}, false},
 		{"extension_odd", []byte{0x1a, 0xbc}, []byte{0x0a, 0x0b, 0x0c}, false},
@@ -106,7 +107,7 @@ func TestWrongRootFails(t *testing.T) {
 
 	var wrongRoot [32]byte // all zeros
 	_, err := VerifyProof(wrongRoot, []byte{0x01}, [][]byte{leafRLP})
-	if err != ErrRootMismatch {
+	if !errors.Is(err, ErrRootMismatch) {
 		t.Fatalf("expected ErrRootMismatch, got %v", err)
 	}
 }
@@ -115,7 +116,7 @@ func TestWrongRootFails(t *testing.T) {
 func TestEmptyProofFails(t *testing.T) {
 	var root [32]byte
 	_, err := VerifyProof(root, []byte{0x01}, nil)
-	if err != ErrInvalidProof {
+	if !errors.Is(err, ErrInvalidProof) {
 		t.Fatalf("expected ErrInvalidProof, got %v", err)
 	}
 }
@@ -128,7 +129,7 @@ func TestTooManyNodesFails(t *testing.T) {
 		proof[i] = []byte{0xc0} // empty list
 	}
 	_, err := VerifyProof(root, []byte{0x01}, proof)
-	if err != ErrProofTooLong {
+	if !errors.Is(err, ErrProofTooLong) {
 		t.Fatalf("expected ErrProofTooLong, got %v", err)
 	}
 }

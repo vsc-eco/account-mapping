@@ -2,19 +2,19 @@ package mapping
 
 import (
 	"encoding/hex"
-	"errors"
 	"evm-mapping-contract/contract/blocklist"
+	ce "evm-mapping-contract/contract/contracterrors"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/mpt"
 	"evm-mapping-contract/contract/rlp"
 )
 
 var (
-	ErrBlockNotFound   = errors.New("block header not found")
-	ErrProofFailed     = errors.New("proof verification failed")
-	ErrNotVaultDeposit = errors.New("transaction is not a deposit to vault")
-	ErrAlreadyObserved = errors.New("deposit already processed")
-	ErrInvalidToken    = errors.New("token not registered")
+	ErrBlockNotFound   = ce.NewContractError(ce.ErrStateAccess, "block header not found")
+	ErrProofFailed     = ce.NewContractError(ce.ErrTransaction, "proof verification failed")
+	ErrNotVaultDeposit = ce.NewContractError(ce.ErrIntent, "transaction is not a deposit to vault")
+	ErrAlreadyObserved = ce.NewContractError(ce.ErrIntent, "deposit already processed")
+	ErrInvalidToken    = ce.NewContractError(ce.ErrIntent, "token not registered")
 )
 
 // keccak256("Transfer(address,address,uint256)") = ddf252ad...
@@ -34,12 +34,12 @@ func VerifyETHDeposit(req *VerificationRequest, vaultAddress [20]byte) ([20]byte
 
 	rawBytes, err := hex.DecodeString(req.RawHex)
 	if err != nil {
-		return sender, nil, txHash, errors.New("invalid raw_hex")
+		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
 	}
 
 	proofBytes, err := hex.DecodeString(req.MerkleProofHex)
 	if err != nil {
-		return sender, nil, txHash, errors.New("invalid merkle_proof_hex")
+		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
 	}
 
 	proof := splitProofNodes(proofBytes)
@@ -82,10 +82,10 @@ func VerifyETHDeposit(req *VerificationRequest, vaultAddress [20]byte) ([20]byte
 
 	sender, err = crypto.Ecrecover(sighash, recoveryV, rPadded, sPadded)
 	if err != nil {
-		return sender, nil, txHash, errors.New("ecrecover failed: " + err.Error())
+		return sender, nil, txHash, ce.Prepend(err, "ecrecover failed")
 	}
 	if sender == ([20]byte{}) {
-		return sender, nil, txHash, errors.New("ecrecover returned zero address")
+		return sender, nil, txHash, ce.NewContractError(ce.ErrTransaction, "ecrecover returned zero address")
 	}
 
 	// Mark as observed
@@ -111,12 +111,12 @@ func VerifyERC20Deposit(
 
 	receiptBytes, err := hex.DecodeString(req.RawHex)
 	if err != nil {
-		return sender, nil, txHash, errors.New("invalid raw_hex")
+		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
 	}
 
 	proofBytes, err := hex.DecodeString(req.MerkleProofHex)
 	if err != nil {
-		return sender, nil, txHash, errors.New("invalid merkle_proof_hex")
+		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
 	}
 
 	proof := splitProofNodes(proofBytes)
@@ -144,7 +144,7 @@ func VerifyERC20Deposit(
 	}
 
 	if req.LogIndex > 10000 || int(req.LogIndex) >= len(logs) {
-		return sender, nil, txHash, errors.New("log_index out of range")
+		return sender, nil, txHash, ce.NewContractError(ce.ErrInput, "log_index out of range")
 	}
 
 	log := logs[req.LogIndex]
@@ -156,10 +156,10 @@ func VerifyERC20Deposit(
 
 	// Verify: topics[0] == Transfer event signature
 	if len(log.Topics) < 3 {
-		return sender, nil, txHash, errors.New("insufficient topics for Transfer event")
+		return sender, nil, txHash, ce.NewContractError(ce.ErrInput, "insufficient topics for Transfer event")
 	}
 	if log.Topics[0] != TransferEventSig {
-		return sender, nil, txHash, errors.New("not a Transfer event")
+		return sender, nil, txHash, ce.NewContractError(ce.ErrIntent, "not a Transfer event")
 	}
 
 	// topics[2] == vault address (padded to 32 bytes)
@@ -172,7 +172,7 @@ func VerifyERC20Deposit(
 	// Sender from topics[1] (padded address)
 	copy(sender[:], log.Topics[1][12:])
 	if sender == ([20]byte{}) {
-		return sender, nil, txHash, errors.New("zero-address sender (mint event, not a deposit)")
+		return sender, nil, txHash, ce.NewContractError(ce.ErrIntent, "zero-address sender (mint event, not a deposit)")
 	}
 
 	// Amount from log.Data (uint256, big-endian)
@@ -187,7 +187,7 @@ func VerifyERC20Deposit(
 // Handles both legacy and EIP-1559 (type 2) transactions.
 func parseTransaction(raw []byte) (*ParsedTx, error) {
 	if len(raw) == 0 {
-		return nil, errors.New("empty transaction")
+		return nil, ce.NewContractError(ce.ErrInput, "empty transaction")
 	}
 
 	// EIP-2718 typed transaction: first byte is the type
@@ -196,7 +196,7 @@ func parseTransaction(raw []byte) (*ParsedTx, error) {
 		if txType == 2 {
 			return parseEIP1559Tx(raw[1:])
 		}
-		return nil, errors.New("unsupported tx type")
+		return nil, ce.NewContractError(ce.ErrInput, "unsupported tx type")
 	}
 
 	// Legacy transaction
@@ -210,7 +210,7 @@ func parseEIP1559Tx(data []byte) (*ParsedTx, error) {
 	}
 	// EIP-1559: [chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, v, r, s]
 	if len(items) < 12 {
-		return nil, errors.New("invalid EIP-1559 tx: too few fields")
+		return nil, ce.NewContractError(ce.ErrInput, "invalid EIP-1559 tx: too few fields")
 	}
 
 	tx := &ParsedTx{
@@ -236,7 +236,7 @@ func parseLegacyTx(data []byte) (*ParsedTx, error) {
 	}
 	// Legacy: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
 	if len(items) < 9 {
-		return nil, errors.New("invalid legacy tx: too few fields")
+		return nil, ce.NewContractError(ce.ErrInput, "invalid legacy tx: too few fields")
 	}
 
 	v := items[6].AsUint64()
@@ -263,6 +263,17 @@ func parseLegacyTx(data []byte) (*ParsedTx, error) {
 	return parsed, nil
 }
 
+func reencodeItem(item rlp.Item) []byte {
+	if !item.IsList {
+		return rlp.EncodeBytes(item.AsBytes())
+	}
+	children := make([][]byte, len(item.Children))
+	for i, child := range item.Children {
+		children[i] = reencodeItem(child)
+	}
+	return rlp.EncodeList(children...)
+}
+
 func computeTxSighash(raw []byte, tx *ParsedTx) []byte {
 	// For EIP-1559: sighash = keccak256(0x02 || RLP([chainId, nonce, ...fields without v,r,s]))
 	// For legacy EIP-155: sighash = keccak256(RLP([nonce, gasPrice, gas, to, value, data, chainId, 0, 0]))
@@ -278,21 +289,7 @@ func computeTxSighash(raw []byte, tx *ParsedTx) []byte {
 		unsigned := make([][]byte, 9)
 		for i := 0; i < 9; i++ {
 			if items[i].IsList {
-				// BUG: this only preserves a single level of children. EIP-2930
-				// access list entries are themselves lists ([address, [storageKeys...]]),
-				// so the storage-keys sublist is silently re-encoded as empty here. The
-				// resulting sighash will mismatch for any tx with non-empty storage keys.
-				// Safe today only because BuildETHWithdrawalTx / BuildERC20WithdrawalTx
-				// always emit an empty access list (withdrawal.go:114).
-				children := make([][]byte, len(items[i].Children))
-				for j, child := range items[i].Children {
-					if child.IsList {
-						children[j] = rlp.EncodeList()
-					} else {
-						children[j] = rlp.EncodeBytes(child.AsBytes())
-					}
-				}
-				unsigned[i] = rlp.EncodeList(children...)
+				unsigned[i] = reencodeItem(items[i])
 			} else {
 				unsigned[i] = rlp.EncodeBytes(items[i].AsBytes())
 			}
@@ -333,10 +330,10 @@ func parseReceiptLogs(receiptRLP []byte) ([]ParsedLog, error) {
 	}
 	// Receipt: [status, cumulativeGasUsed, bloom, logs]
 	if len(items) < 4 {
-		return nil, errors.New("invalid receipt: too few fields")
+		return nil, ce.NewContractError(ce.ErrInput, "invalid receipt: too few fields")
 	}
 	if !items[3].IsList {
-		return nil, errors.New("receipt logs should be a list")
+		return nil, ce.NewContractError(ce.ErrInput, "receipt logs should be a list")
 	}
 
 	logs := make([]ParsedLog, 0, len(items[3].Children))
