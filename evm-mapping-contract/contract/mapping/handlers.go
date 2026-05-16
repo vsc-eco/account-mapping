@@ -131,9 +131,13 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		return "", errors.New("insufficient gas reserve")
 	}
 
-	gasTipCap := uint64(2_000_000_000)                  // 2 gwei
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	fee := int64(constants.ETHTransferGas * gasFeeCap)
+	gasTipCap := uint64(2_000_000_000) // 2 gwei
+	// review2 HIGH #16: checked arithmetic — a negative (wrapped) fee here
+	// inflated the user's balance instead of debiting it.
+	gasFeeCap, fee, feeErr := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return "", errors.New("gas fee computation overflow")
+	}
 
 	if params.MaxFee != "" {
 		maxFee, _ := strconv.ParseInt(params.MaxFee, 10, 64)
@@ -227,8 +231,11 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	}
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	gasCost := int64(constants.ERC20TransferGas * gasFeeCap)
+	// review2 HIGH #16: checked arithmetic (see safeGasFee).
+	gasFeeCap, gasCost, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return "", errors.New("gas fee computation overflow")
+	}
 
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
@@ -676,7 +683,13 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	TrackWithdrawal(params.Asset, amount)
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
+	// review2 HIGH #16: checked arithmetic. gasReserveFee replaces the
+	// int64(ERC20TransferGas*gasFeeCap) cast below that could wrap negative
+	// and corrupt the gas reserve via deductGasReserve.
+	gasFeeCap, gasReserveFee, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return errors.New("gas fee computation overflow")
+	}
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
 
@@ -690,7 +703,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		unsigned = BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, amountBig)
 		asset = params.Asset
 		tokenAddress = params.TokenAddress
-		deductGasReserve(int64(constants.ERC20TransferGas * gasFeeCap))
+		deductGasReserve(gasReserveFee)
 	}
 
 	sighash := ComputeSighash(unsigned)

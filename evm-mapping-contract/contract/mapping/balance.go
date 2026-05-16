@@ -18,6 +18,37 @@ func safeAdd64(a, b int64) (int64, error) {
 	return a + b, nil
 }
 
+// safeGasFee computes (gasFeeCap, fee) where
+//   gasFeeCap = baseFeePerGas*2 + gasTipCap
+//   fee       = gasUnits * gasFeeCap
+// rejecting every uint64 add/mul overflow and the int64 truncation.
+//
+// review2 HIGH #16: this was `int64(gasUnits * (baseFeePerGas*2 +
+// gasTipCap))` with no checks. A large baseFeePerGas made the uint64
+// product exceed MaxInt64, the int64 cast wrapped NEGATIVE, and the
+// negative fee inflated the user's balance instead of debiting it.
+func safeGasFee(gasUnits, baseFeePerGas, gasTipCap uint64) (uint64, int64, error) {
+	doubled := baseFeePerGas * 2
+	if baseFeePerGas != 0 && doubled/2 != baseFeePerGas {
+		return 0, 0, errors.New("gas fee cap overflow")
+	}
+	gasFeeCap := doubled + gasTipCap
+	if gasFeeCap < doubled {
+		return 0, 0, errors.New("gas fee cap overflow")
+	}
+	if gasUnits == 0 || gasFeeCap == 0 {
+		return gasFeeCap, 0, nil
+	}
+	product := gasUnits * gasFeeCap
+	if product/gasFeeCap != gasUnits {
+		return 0, 0, errors.New("gas fee overflow")
+	}
+	if product > math.MaxInt64 {
+		return 0, 0, errors.New("gas fee exceeds int64")
+	}
+	return gasFeeCap, int64(product), nil
+}
+
 func balanceKey(address, asset string) string {
 	return constants.BalancePrefix + address + constants.DirPathDelimiter + asset
 }
