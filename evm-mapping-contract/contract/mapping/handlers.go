@@ -120,6 +120,11 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if err != nil {
 		return "", errors.New("invalid 'to' address")
 	}
+	// review2 #44: the zero address parses as a valid [20]byte; a
+	// TSS-signed withdrawal to 0x000…0 burns the funds irrecoverably.
+	if toAddr == ([20]byte{}) {
+		return "", errors.New("refusing withdrawal to zero address")
+	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
@@ -131,9 +136,13 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		return "", errors.New("insufficient gas reserve")
 	}
 
-	gasTipCap := uint64(2_000_000_000)                  // 2 gwei
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	fee := int64(constants.ETHTransferGas * gasFeeCap)
+	gasTipCap := uint64(2_000_000_000) // 2 gwei
+	// review2 HIGH #16: checked arithmetic — a negative (wrapped) fee here
+	// inflated the user's balance instead of debiting it.
+	gasFeeCap, fee, feeErr := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return "", errors.New("gas fee computation overflow")
+	}
 
 	if params.MaxFee != "" {
 		maxFee, _ := strconv.ParseInt(params.MaxFee, 10, 64)
@@ -164,17 +173,35 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if !DecBalance(caller, "eth", totalDeduct) {
 		return "", errors.New("insufficient balance")
 	}
-	TrackWithdrawal("eth", amount)
+	// review2 #76: the user balance was debited totalDeduct (amount+fee)
+	// but TrackWithdrawal only reduced supply by `amount`, so Supply.User
+	// drifted above the true sum of user balances by `fee` every
+	// withdrawal. Reduce User by the full debit, Active by the bridged
+	// amount, and book the fee as protocol Fee so the invariant
+	// Supply.User == Σ user balances holds.
+	{
+		s := GetSupply("eth")
+		s.Active -= amount
+		if s.Active < 0 {
+			s.Active = 0
+		}
+		s.User -= totalDeduct
+		if s.User < 0 {
+			s.User = 0
+		}
+		s.Fee += totalDeduct - amount
+		SetSupply("eth", s)
+	}
 
 	// Store pending spend
 	StorePendingSpend(PendingSpend{
-		Nonce:       nonce,
-		Amount:      amount,
-		From:        caller,
-		To:          params.To,
-		Asset:       "eth",
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          caller,
+		To:            params.To,
+		Asset:         "eth",
 		UnsignedTxHex: hex.EncodeToString(unsigned),
-		BlockHeight: blocklist.GetLastHeight(),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 
@@ -215,6 +242,10 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	if err != nil {
 		return "", errors.New("invalid recipient address")
 	}
+	// review2 #44: refuse the zero address (TSS-signed burn).
+	if recipientAddr == ([20]byte{}) {
+		return "", errors.New("refusing withdrawal to zero address")
+	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
@@ -227,8 +258,11 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	}
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
-	gasCost := int64(constants.ERC20TransferGas * gasFeeCap)
+	// review2 HIGH #16: checked arithmetic (see safeGasFee).
+	gasFeeCap, gasCost, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return "", errors.New("gas fee computation overflow")
+	}
 
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
@@ -248,14 +282,14 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	deductGasReserve(gasCost)
 
 	StorePendingSpend(PendingSpend{
-		Nonce:        nonce,
-		Amount:       amount,
-		From:         caller,
-		To:           params.To,
-		Asset:        tokenInfo.Symbol,
-		TokenAddress: params.TokenAddress,
-		UnsignedTxHex:  hex.EncodeToString(unsigned),
-		BlockHeight:  blocklist.GetLastHeight(),
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          caller,
+		To:            params.To,
+		Asset:         tokenInfo.Symbol,
+		TokenAddress:  params.TokenAddress,
+		UnsignedTxHex: hex.EncodeToString(unsigned),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 
@@ -431,6 +465,12 @@ func HandleTransfer(params *TransferParams) error {
 		return errors.New("invalid amount")
 	}
 
+	// review2 #43: an empty recipient credited the "" address, making the
+	// funds permanently unspendable. Reject it.
+	if params.To == "" {
+		return errors.New("invalid recipient")
+	}
+
 	if !DecBalance(caller, params.Asset, amount) {
 		return errors.New("insufficient balance")
 	}
@@ -450,6 +490,11 @@ func HandleTransferFrom(params *TransferParams) error {
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
 		return errors.New("invalid amount")
+	}
+
+	// review2 #43: reject empty recipient (funds would be unspendable).
+	if params.To == "" {
+		return errors.New("invalid recipient")
 	}
 
 	allowance := GetAllowance(params.From, caller, params.Asset)
@@ -607,7 +652,6 @@ func deductGasReserve(amount int64) {
 	sdk.StateSetObject(constants.GasReserveKey, strconv.FormatInt(newVal, 10))
 }
 
-
 func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
 		return errors.New("contract is paused")
@@ -635,6 +679,10 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
 		return errors.New("invalid destination address")
+	}
+	// review2 #44: refuse the zero address (TSS-signed burn).
+	if toAddr == ([20]byte{}) {
+		return errors.New("refusing withdrawal to zero address")
 	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
@@ -676,7 +724,13 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	TrackWithdrawal(params.Asset, amount)
 
 	gasTipCap := uint64(2_000_000_000)
-	gasFeeCap := header.BaseFeePerGas*2 + gasTipCap
+	// review2 HIGH #16: checked arithmetic. gasReserveFee replaces the
+	// int64(ERC20TransferGas*gasFeeCap) cast below that could wrap negative
+	// and corrupt the gas reserve via deductGasReserve.
+	gasFeeCap, gasReserveFee, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, gasTipCap)
+	if feeErr != nil {
+		return errors.New("gas fee computation overflow")
+	}
 	nonce := GetPendingNonce()
 	amountBig := new(big.Int).SetInt64(amount)
 
@@ -690,21 +744,21 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		unsigned = BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, amountBig)
 		asset = params.Asset
 		tokenAddress = params.TokenAddress
-		deductGasReserve(int64(constants.ERC20TransferGas * gasFeeCap))
+		deductGasReserve(gasReserveFee)
 	}
 
 	sighash := ComputeSighash(unsigned)
 	sdk.TssSignKey("primary", sighash)
 
 	StorePendingSpend(PendingSpend{
-		Nonce:        nonce,
-		Amount:       amount,
-		From:         params.From,
-		To:           params.To,
-		Asset:        asset,
-		TokenAddress: tokenAddress,
-		UnsignedTxHex:  hex.EncodeToString(unsigned),
-		BlockHeight:  blocklist.GetLastHeight(),
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          params.From,
+		To:            params.To,
+		Asset:         asset,
+		TokenAddress:  tokenAddress,
+		UnsignedTxHex: hex.EncodeToString(unsigned),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 	return nil

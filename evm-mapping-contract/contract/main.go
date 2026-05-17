@@ -201,7 +201,9 @@ func adminMint(input *string) *string {
 	if params.Amount <= 0 || params.Address == "" || params.Asset == "" {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "address, asset, and positive amount required"))
 	}
-	if err := mapping.IncBalance(params.Address, params.Asset, params.Amount); err != nil {
+	// review2 #42: AdminCredit also updates Supply so admin mints don't
+	// desync balance vs. supply accounting.
+	if err := mapping.AdminCredit(params.Address, params.Asset, params.Amount); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "balance overflow"))
 	}
 	return nil
