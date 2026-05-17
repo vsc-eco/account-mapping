@@ -8,10 +8,10 @@ import (
 )
 
 type Supply struct {
-	Active   int64 // total bridged
-	User     int64 // credited to users
-	Fee      int64 // protocol fees
-	BaseFee  uint64 // latest base fee
+	Active  int64  // total bridged
+	User    int64  // credited to users
+	Fee     int64  // protocol fees
+	BaseFee uint64 // latest base fee
 }
 
 func supplyKey(asset string) string {
@@ -62,4 +62,20 @@ func TrackWithdrawal(asset string, amount int64) {
 		s.User = 0
 	}
 	SetSupply(asset, s)
+}
+
+// AdminCredit mints `amount` of `asset` to `address` (owner-only mint)
+// and keeps Supply consistent. review2 #42: adminMint previously did
+// IncBalance only, so Supply.User/Active never reflected admin-minted
+// tokens; a later TrackWithdrawal then drove them negative→clamped,
+// silently corrupting solvency accounting. Mirrors TrackDeposit (no fee).
+func AdminCredit(address, asset string, amount int64) error {
+	if err := IncBalance(address, asset, amount); err != nil {
+		return err
+	}
+	s := GetSupply(asset)
+	s.Active += amount
+	s.User += amount
+	SetSupply(asset, s)
+	return nil
 }

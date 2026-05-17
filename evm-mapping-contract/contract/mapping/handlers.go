@@ -120,6 +120,11 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if err != nil {
 		return "", errors.New("invalid 'to' address")
 	}
+	// review2 #44: the zero address parses as a valid [20]byte; a
+	// TSS-signed withdrawal to 0x000…0 burns the funds irrecoverably.
+	if toAddr == ([20]byte{}) {
+		return "", errors.New("refusing withdrawal to zero address")
+	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
@@ -168,17 +173,35 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if !DecBalance(caller, "eth", totalDeduct) {
 		return "", errors.New("insufficient balance")
 	}
-	TrackWithdrawal("eth", amount)
+	// review2 #76: the user balance was debited totalDeduct (amount+fee)
+	// but TrackWithdrawal only reduced supply by `amount`, so Supply.User
+	// drifted above the true sum of user balances by `fee` every
+	// withdrawal. Reduce User by the full debit, Active by the bridged
+	// amount, and book the fee as protocol Fee so the invariant
+	// Supply.User == Σ user balances holds.
+	{
+		s := GetSupply("eth")
+		s.Active -= amount
+		if s.Active < 0 {
+			s.Active = 0
+		}
+		s.User -= totalDeduct
+		if s.User < 0 {
+			s.User = 0
+		}
+		s.Fee += totalDeduct - amount
+		SetSupply("eth", s)
+	}
 
 	// Store pending spend
 	StorePendingSpend(PendingSpend{
-		Nonce:       nonce,
-		Amount:      amount,
-		From:        caller,
-		To:          params.To,
-		Asset:       "eth",
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          caller,
+		To:            params.To,
+		Asset:         "eth",
 		UnsignedTxHex: hex.EncodeToString(unsigned),
-		BlockHeight: blocklist.GetLastHeight(),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 
@@ -219,6 +242,10 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	if err != nil {
 		return "", errors.New("invalid recipient address")
 	}
+	// review2 #44: refuse the zero address (TSS-signed burn).
+	if recipientAddr == ([20]byte{}) {
+		return "", errors.New("refusing withdrawal to zero address")
+	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
@@ -255,14 +282,14 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	deductGasReserve(gasCost)
 
 	StorePendingSpend(PendingSpend{
-		Nonce:        nonce,
-		Amount:       amount,
-		From:         caller,
-		To:           params.To,
-		Asset:        tokenInfo.Symbol,
-		TokenAddress: params.TokenAddress,
-		UnsignedTxHex:  hex.EncodeToString(unsigned),
-		BlockHeight:  blocklist.GetLastHeight(),
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          caller,
+		To:            params.To,
+		Asset:         tokenInfo.Symbol,
+		TokenAddress:  params.TokenAddress,
+		UnsignedTxHex: hex.EncodeToString(unsigned),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 
@@ -438,6 +465,12 @@ func HandleTransfer(params *TransferParams) error {
 		return errors.New("invalid amount")
 	}
 
+	// review2 #43: an empty recipient credited the "" address, making the
+	// funds permanently unspendable. Reject it.
+	if params.To == "" {
+		return errors.New("invalid recipient")
+	}
+
 	if !DecBalance(caller, params.Asset, amount) {
 		return errors.New("insufficient balance")
 	}
@@ -457,6 +490,11 @@ func HandleTransferFrom(params *TransferParams) error {
 	amount, err := strconv.ParseInt(params.Amount, 10, 64)
 	if err != nil || amount <= 0 {
 		return errors.New("invalid amount")
+	}
+
+	// review2 #43: reject empty recipient (funds would be unspendable).
+	if params.To == "" {
+		return errors.New("invalid recipient")
 	}
 
 	allowance := GetAllowance(params.From, caller, params.Asset)
@@ -614,7 +652,6 @@ func deductGasReserve(amount int64) {
 	sdk.StateSetObject(constants.GasReserveKey, strconv.FormatInt(newVal, 10))
 }
 
-
 func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
 		return errors.New("contract is paused")
@@ -642,6 +679,10 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
 		return errors.New("invalid destination address")
+	}
+	// review2 #44: refuse the zero address (TSS-signed burn).
+	if toAddr == ([20]byte{}) {
+		return errors.New("refusing withdrawal to zero address")
 	}
 
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
@@ -710,14 +751,14 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	sdk.TssSignKey("primary", sighash)
 
 	StorePendingSpend(PendingSpend{
-		Nonce:        nonce,
-		Amount:       amount,
-		From:         params.From,
-		To:           params.To,
-		Asset:        asset,
-		TokenAddress: tokenAddress,
-		UnsignedTxHex:  hex.EncodeToString(unsigned),
-		BlockHeight:  blocklist.GetLastHeight(),
+		Nonce:         nonce,
+		Amount:        amount,
+		From:          params.From,
+		To:            params.To,
+		Asset:         asset,
+		TokenAddress:  tokenAddress,
+		UnsignedTxHex: hex.EncodeToString(unsigned),
+		BlockHeight:   blocklist.GetLastHeight(),
 	})
 	SetPendingNonce(nonce + 1)
 	return nil
