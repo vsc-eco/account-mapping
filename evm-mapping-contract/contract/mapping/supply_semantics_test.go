@@ -70,7 +70,8 @@ func TestSupply_DepositTaxGoesToReserveNotFee(t *testing.T) {
 //	unmap    → Active/User -= value+fee
 //	success  → no further movement
 //	reverted → +value back (gas stays spent, borne by the withdrawer)
-//	dropped  → +value+fee back (nothing was spent)
+//	dropped  → +value back (E9: only Type-A mined-reverted proofs are accepted,
+//	           so the gas was paid; value only, never the fee)
 func TestSupply_UnmapRoundtrips(t *testing.T) {
 	value := big.NewInt(500_000)
 	fee := big.NewInt(42_000)
@@ -110,19 +111,23 @@ func TestSupply_UnmapRoundtrips(t *testing.T) {
 		}
 	})
 
-	t.Run("dropped_refunds_value_plus_fee", func(t *testing.T) {
+	t.Run("dropped_refunds_value_only", func(t *testing.T) {
 		seed()
 		refundDroppedWithdrawal(&PendingSpend{
 			Amount: value, From: "hive:alice", Asset: "eth", GasCost: fee,
 		})
 		ethInvariant(t, "after dropped refund")
-		// Nothing left custody: the user is made completely whole.
-		if got := GetBalance("hive:alice", "eth"); got.Cmp(debit) != 0 {
-			t.Fatalf("dropped refund: want balance %s, got %s", debit, got)
+		// E9 (RV re-verify): the only drop proof the verifier accepts is Type-A
+		// (mined, reverted) — the tx mined and the L1 gas was genuinely paid, so
+		// only the VALUE comes back, never the fee (matches the reverted branch
+		// above). The pre-fix refund of value+fee was a slow drain a withdrawer
+		// could farm with reverting withdrawals.
+		if got := GetBalance("hive:alice", "eth"); got.Cmp(value) != 0 {
+			t.Fatalf("dropped refund must return value only: want %s, got %s", value, got)
 		}
 		s := GetSupply("eth")
-		if s.Active.Cmp(debit) != 0 || s.User.Cmp(debit) != 0 {
-			t.Fatalf("dropped refund must fully restore supply: Active=%s User=%s want %s", s.Active, s.User, debit)
+		if s.Active.Cmp(value) != 0 || s.User.Cmp(value) != 0 {
+			t.Fatalf("dropped refund must restore supply by value only: Active=%s User=%s want %s", s.Active, s.User, value)
 		}
 	})
 }

@@ -88,7 +88,8 @@ func assertNotPaused() {
 // -----------------------------------------------------------------------------
 
 type initContractParams struct {
-	IsTestnet bool `json:"is_testnet"`
+	IsTestnet bool   `json:"is_testnet"`
+	ChainId   uint64 `json:"chain_id"`
 }
 
 //go:wasmexport initContract
@@ -103,8 +104,20 @@ func initContract(input *string) *string {
 	}
 	var params initContractParams
 	if input != nil && *input != "" {
-		_ = json.Unmarshal([]byte(*input), &params)
+		if err := json.Unmarshal([]byte(*input), &params); err != nil {
+			ce.CustomAbort(ce.WrapContractError(ce.ErrJson, err, "initContract"))
+		}
 	}
+	// RV-2 (RV re-verify): the bridge chainId must be set at init. The old
+	// setChainId action was removed (df458b7, "set once via initContract") but
+	// initContract never actually set it, so chainId() fell back to 1 forever —
+	// every non-mainnet (e.g. Sepolia) deposit was rejected as a chain mismatch
+	// and testnet withdrawals would have been signed as chain-1 txs. Require a
+	// non-zero chain_id here; it is immutable afterwards (no other writer).
+	if params.ChainId == 0 {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "initContract requires a non-zero chain_id"))
+	}
+	sdk.StateSetObject(constants.ChainIdKey, strconv.FormatUint(params.ChainId, 10))
 	// review6 H2: OracleAccountKey is no longer written at init — the
 	// oracle-fed addBlocks path was removed; headers come from the ZK
 	// header-verifier contract via setVerifierContract.
@@ -385,7 +398,21 @@ func dispatchAdmin(action string, payload []byte) {
 		if perr != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: "+perr.Error()))
 		}
-		sdk.StateSetObject(constants.VaultAddressKey, addr)
+		// RV re-verify (MED-23 correction): decodeAddressPayload only unwraps the
+		// string; it never validated that the result is a real address. A typo'd
+		// setVault would store junk, make vault() return zero (deposits revert),
+		// and — worse — any unmap would snapshot VaultAtQueue=0x0, which
+		// confirmSpend/expireWithdrawal both refuse, wedging the single withdrawal
+		// queue permanently after the 14-day timelock. Validate it is a non-zero
+		// 20-byte address before storing (it also round-trips to canonical 0x-hex).
+		parsed, aerr := crypto.HexToAddress(addr)
+		if aerr != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: not a 20-byte hex address"))
+		}
+		if parsed == ([20]byte{}) {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: refusing the zero address"))
+		}
+		sdk.StateSetObject(constants.VaultAddressKey, crypto.AddressToHex(parsed))
 
 	case "setVerifierContract":
 		assertNotPaused()
@@ -473,6 +500,17 @@ func dispatchAdmin(action string, payload []byte) {
 		}
 		if strings.Contains(p.Symbol, "|") {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: symbol must not contain '|'"))
+		}
+		// E1 (RV re-verify): the balance key is `a-{addr}-{asset}` and the
+		// allowed-symbol marker is `as-{symbol}`. A symbol containing the '-'
+		// path delimiter (or ':' account-domain separator) could alias another
+		// account's key or another symbol's marker, re-opening the key-injection
+		// E1 closes. Real token symbols never need these characters.
+		if strings.ContainsAny(p.Symbol, "-:") {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: symbol must not contain '-' or ':'"))
+		}
+		if p.Symbol == constants.NativeAsset {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: symbol must not shadow the native 'eth' asset"))
 		}
 		// MED-20 (M18-D9): bound MinWithdrawal. A negative value is nonsensical;
 		// MaxInt64 (or anything above MaxTokenMinWithdrawal) makes every unmap
