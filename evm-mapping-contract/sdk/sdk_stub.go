@@ -166,17 +166,6 @@ func cryptoEcrecover(hashHex *string, sigHex *string) *string {
 	return &addr
 }
 
-// CRIT #11 site 4 — stub-mode shims for the explicit-name host bindings.
-// Behavior equivalence with the wasmimport names is not required for
-// unit-test stubs; mirror the same recovery as cryptoEcrecover.
-func cryptoEcrecoverStrict(hashHex *string, sigHex *string) *string {
-	return cryptoEcrecover(hashHex, sigHex)
-}
-
-func cryptoEcrecoverCanonical(hashHex *string, sigHex *string) *string {
-	return cryptoEcrecover(hashHex, sigHex)
-}
-
 func cryptoRlpDecode(hexData *string) *string { return nil }
 
 //go:wasmimport env abort
