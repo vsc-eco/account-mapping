@@ -20,11 +20,9 @@ func Keccak256Hash(data []byte) [32]byte {
 }
 
 // Ecrecover is the legacy wrapper kept for source-compat with existing
-// call sites. Behavior is canonical-by-default per the host fix in
-// modules/wasm/sdk/sdk.go (CRIT #11) — high-S sigs are normalized to
-// low-S host-side before recovery. New contract code should prefer
-// EcrecoverStrict (SYSTEM) or EcrecoverCanonical (USER) for explicit
-// per-site policy.
+// call sites. It applies no low-S rule (the node's plain
+// `crypto.ecrecover`). New contract code should use EcrecoverStrict
+// (SYSTEM) or EcrecoverCanonical (USER) for explicit per-site policy.
 func Ecrecover(hash []byte, v byte, r, s []byte) ([20]byte, error) {
 	return ecrecoverDispatch(hash, v, r, s, sdk.Ecrecover)
 }
