@@ -170,7 +170,19 @@ var testCreatedKeys []string
 func TestCreatedKeys() []string { return append([]string(nil), testCreatedKeys...) }
 
 //go:wasmimport sdk tss_v2.renew_key
-func tssRenewKey(keyId *string, epochs *string) *string { r := ""; return &r }
+func tssRenewKey(keyId *string, epochs *string) *string {
+	testRenewedKeys = append(testRenewedKeys, *keyId+","+*epochs)
+	r := "renewed"
+	return &r
+}
+
+// testRenewedKeys records every tss_v2.renew_key call as "id,epochs"
+// (test-only; see TestRenewedKeys).
+var testRenewedKeys []string
+
+// TestRenewedKeys returns the keys renewed since the last ResetTestState.
+// Test-only.
+func TestRenewedKeys() []string { return append([]string(nil), testRenewedKeys...) }
 
 //go:wasmimport sdk tss.sign_key
 func tssSignKey(keyId *string, msgId *string) *string {
@@ -270,6 +282,7 @@ func ResetTestState() {
 	testLogs = nil
 	testCreatedKeys = nil
 	testSignRequests = nil
+	testRenewedKeys = nil
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}
