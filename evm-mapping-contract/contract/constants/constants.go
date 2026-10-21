@@ -2,10 +2,20 @@ package constants
 
 const DirPathDelimiter = "-"
 
+// ALLOW-1 (allowance key collision), the BTC mapping contract's fix ported:
+// the allowance key joins the owner and spender identities, both of which may
+// contain "-" (Hive usernames allow it). Joined with "-", hive:alice approving
+// the spender "bob-hive:mallory" wrote the key of hive:alice-bob's allowance
+// for hive:mallory, so mallory could spend alice-bob's balance. The owner part
+// is always env.Caller, an authenticated identity, and no identity that can
+// own a balance contains "|", so "|" cannot be forged across owners. Spenders
+// are also checked with sdk.VerifyAddress (mapping/handlers.go).
+const AllowanceDelimiter = "|"
+
 // State key prefixes — mirrors BTC contract pattern
 const (
 	BalancePrefix           = "a" + DirPathDelimiter // a-{address}-{asset} → balance
-	AllowancePrefix         = "q" + DirPathDelimiter // q-{owner}-{spender}-{asset} → allowance
+	AllowancePrefix         = "q" + AllowanceDelimiter // q|{owner}|{spender}|{asset} → allowance (ALLOW-1, see AllowanceDelimiter)
 	ObservedBlockPrefix     = "o" + DirPathDelimiter // o-{height}-... → observed deposits
 	// M21-22: per-entry observed keys make IsObserved/MarkObserved O(1) instead
 	// of the previous O(N) blob read-append-rewrite (which was O(N^2) per block
