@@ -259,63 +259,56 @@ func VerifyERC20Deposit(
 	return sender, amount, txHash, nil
 }
 
-// parseTransaction decodes an RLP-encoded Ethereum transaction.
-// Handles both legacy and EIP-1559 (type 2) transactions.
+// parseTransaction decodes an RLP-encoded Ethereum transaction: legacy, or an
+// EIP-2718 typed transaction of type 1, 2, 3 or 4.
+//
+// E18: types 1 (EIP-2930), 3 (EIP-4844) and 4 (EIP-7702) used to be refused, so
+// ETH a user sent to the vault in one of them was never credited and had no
+// recovery path. A value transfer to the vault EOA succeeds whenever the tx is
+// included, whatever its type, so inclusion in the proven tx trie is as good a
+// deposit proof for these types as for type 2.
 func parseTransaction(raw []byte) (*ParsedTx, error) {
 	if len(raw) == 0 {
 		return nil, ce.NewContractError(ce.ErrInput, "empty transaction")
 	}
-
-	// EIP-2718 typed transaction: first byte is the type
-	// W4 Cluster A HIGH #41: explicitly enumerate and reject the
-	// currently-unsupported tx types BEFORE the parser falls through —
-	// MUST land BEFORE any downstream state mutation in HandleMap.
 	if raw[0] <= 0x7f {
-		txType := raw[0]
-		switch txType {
-		case 1:
-			// EIP-2930 access-list tx — parser not implemented in v1.
-			return nil, ce.NewContractError(
-				ce.ErrInput,
-				"unsupported tx type 1 (EIP-2930 access list) — only EIP-1559 (type-2) and legacy accepted in v1; type-1/3/4 support deferred to post-launch PR",
-			)
-		case 2:
-			return parseEIP1559Tx(raw[1:])
-		case 3:
-			// EIP-4844 blob tx — parser not implemented in v1.
-			return nil, ce.NewContractError(
-				ce.ErrInput,
-				"unsupported tx type 3 (EIP-4844 blob) — only EIP-1559 (type-2) and legacy accepted in v1; type-1/3/4 support deferred to post-launch PR",
-			)
-		case 4:
-			// EIP-7702 set-code (Pectra) — parser not implemented in v1.
-			// HIGH #41: explicit revert here means the deposit is rejected
-			// before any state mutation; type-4 support deferred per
-			// PARTIAL-CLOSES-AND-DEFERRALS item #9.
-			return nil, ce.NewContractError(
-				ce.ErrInput,
-				"unsupported tx type 4 (EIP-7702 set-code) — only EIP-1559 (type-2) and legacy accepted in v1; type-1/3/4 support deferred to post-launch PR",
-			)
-		default:
-			return nil, ce.NewContractError(
-				ce.ErrInput,
-				"unsupported tx type — only EIP-1559 (type-2) and legacy accepted in v1",
-			)
+		layout, ok := typedTxLayouts(raw[0])
+		if !ok {
+			return nil, ce.NewContractError(ce.ErrInput, "unsupported tx type: only legacy and types 1-4 are accepted")
 		}
+		return parseTypedTx(raw[1:], layout)
 	}
-
-	// Legacy transaction
 	return parseLegacyTx(raw)
 }
 
-func parseEIP1559Tx(data []byte) (*ParsedTx, error) {
+// typedTxLayout is where an EIP-2718 typed transaction keeps the fields this
+// contract reads. The signature (yParity, r, s) is always the last three.
+type typedTxLayout struct {
+	name                  string
+	fields, to, value, in int
+}
+
+func typedTxLayouts(txType byte) (typedTxLayout, bool) {
+	switch txType {
+	case 1: // [chainId, nonce, gasPrice, gas, to, value, data, accessList, yParity, r, s]
+		return typedTxLayout{"EIP-2930", 11, 4, 5, 6}, true
+	case 2: // [chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, yParity, r, s]
+		return typedTxLayout{"EIP-1559", 12, 5, 6, 7}, true
+	case 3: // [... accessList, maxFeePerBlobGas, blobVersionedHashes, yParity, r, s]
+		return typedTxLayout{"EIP-4844", 14, 5, 6, 7}, true
+	case 4: // [... accessList, authorizationList, yParity, r, s]
+		return typedTxLayout{"EIP-7702", 13, 5, 6, 7}, true
+	}
+	return typedTxLayout{}, false
+}
+
+func parseTypedTx(data []byte, l typedTxLayout) (*ParsedTx, error) {
 	items, err := rlp.DecodeList(data)
 	if err != nil {
 		return nil, err
 	}
-	// EIP-1559: [chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, v, r, s]
-	if len(items) < 12 {
-		return nil, ce.NewContractError(ce.ErrInput, "invalid EIP-1559 tx: too few fields")
+	if len(items) != l.fields {
+		return nil, ce.NewContractError(ce.ErrInput, "invalid "+l.name+" tx: wrong field count")
 	}
 
 	// MED-27 (M21-15): decode the security-critical integer fields through the
@@ -324,26 +317,26 @@ func parseEIP1559Tx(data []byte) (*ParsedTx, error) {
 	// contract chainId and slip past the downstream ChainId == chainId check).
 	chainId, err := items[0].AsUint64Checked()
 	if err != nil {
-		return nil, errors.New("invalid EIP-1559 tx: chainId field oversized/non-canonical")
+		return nil, errors.New("invalid " + l.name + " tx: chainId field oversized/non-canonical")
 	}
 	nonce, err := items[1].AsUint64Checked()
 	if err != nil {
-		return nil, errors.New("invalid EIP-1559 tx: nonce field oversized/non-canonical")
+		return nil, errors.New("invalid " + l.name + " tx: nonce field oversized/non-canonical")
 	}
-	vVal, err := items[9].AsUint64Checked()
-	if err != nil {
-		return nil, errors.New("invalid EIP-1559 tx: v field oversized/non-canonical")
+	vVal, err := items[l.fields-3].AsUint64Checked()
+	if err != nil || vVal > 1 {
+		return nil, errors.New("invalid " + l.name + " tx: yParity field not 0 or 1")
 	}
 	tx := &ParsedTx{
 		ChainId: chainId,
 		Nonce:   nonce,
-		Value:   items[6].AsBytes(),
-		Data:    items[7].AsBytes(),
+		Value:   items[l.value].AsBytes(),
+		Data:    items[l.in].AsBytes(),
 		V:       byte(vVal),
-		R:       items[10].AsBytes(),
-		S:       items[11].AsBytes(),
+		R:       items[l.fields-2].AsBytes(),
+		S:       items[l.fields-1].AsBytes(),
 	}
-	toBytes := items[5].AsBytes()
+	toBytes := items[l.to].AsBytes()
 	if len(toBytes) == 20 {
 		copy(tx.To[:], toBytes)
 	}
@@ -407,27 +400,23 @@ func reencodeItem(item rlp.Item) []byte {
 }
 
 func computeTxSighash(raw []byte, tx *ParsedTx) []byte {
-	// For EIP-1559: sighash = keccak256(0x02 || RLP([chainId, nonce, ...fields without v,r,s]))
-	// For legacy EIP-155: sighash = keccak256(RLP([nonce, gasPrice, gas, to, value, data, chainId, 0, 0]))
-	// We compute from the raw bytes by re-decoding without the signature fields
-	// For simplicity in v1, we just hash the full raw (the ecrecover will validate)
-	// TODO: implement proper sighash computation for full correctness
-	if len(raw) > 0 && raw[0] == 2 {
-		// EIP-1559: strip type byte, decode list, re-encode without last 3 items
+	// Typed (EIP-2718): sighash = keccak256(type || RLP(every field before the
+	// signature)). Legacy EIP-155: keccak256(RLP([nonce, gasPrice, gas, to,
+	// value, data, chainId, 0, 0])).
+	if len(raw) > 0 && raw[0] <= 0x7f {
 		items, err := rlp.DecodeList(raw[1:])
-		if err != nil || len(items) < 12 {
+		if err != nil || len(items) < 3 {
 			return crypto.Keccak256(raw)
 		}
-		unsigned := make([][]byte, 9)
-		for i := 0; i < 9; i++ {
+		unsigned := make([][]byte, len(items)-3)
+		for i := range unsigned {
 			if items[i].IsList {
 				unsigned[i] = reencodeItem(items[i])
 			} else {
 				unsigned[i] = rlp.EncodeBytes(items[i].AsBytes())
 			}
 		}
-		unsignedRLP := rlp.EncodeList(unsigned...)
-		return crypto.Keccak256(append([]byte{0x02}, unsignedRLP...))
+		return crypto.Keccak256(append([]byte{raw[0]}, rlp.EncodeList(unsigned...)...))
 	}
 	// Legacy EIP-155
 	items, err := rlp.DecodeList(raw)
