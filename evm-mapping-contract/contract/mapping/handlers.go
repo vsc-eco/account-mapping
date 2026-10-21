@@ -451,11 +451,14 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 //
 // W4 Cluster E CRIT #5 + HIGH #13 (D-E-1 + D-E-2): the request carries
 // 4 intent fields verified BEFORE proof work (primary HIGH #13 gate).
+//
+// D8: not pause-gated, as the BTC mapping contract's confirmSpend settle. It
+// records an L1 fact (the queued withdrawal mined; on a revert the value goes
+// back to the withdrawer's L2 balance, which cannot leave while unmaps are
+// paused) and authorizes no new spend. Gated, a pause outlasting the verifier's
+// header retention pruned the mined withdrawal's header, after which nothing
+// could confirm it or prove it dropped: every withdrawal stayed frozen.
 func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
-	if isPaused() {
-		return ce.NewContractError(ce.ErrIntent, "contract is paused")
-	}
-
 	confirmedNonce := GetConfirmedNonce()
 	ps := GetPendingSpend(confirmedNonce)
 	if ps == nil {
