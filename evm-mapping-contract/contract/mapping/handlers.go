@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // IsWhitelistedRelayer — W4 Cluster C CRIT #8 native-ETH frontrun mitigation
@@ -210,9 +211,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
 
-	header := blocklist.GetHeader(blocklist.GetLastHeight())
-	if header == nil {
-		return "", ce.NewContractError(ce.ErrInitialization, "no block headers available")
+	header, herr := pricingHeader()
+	if herr != nil {
+		return "", herr
 	}
 
 	gasReserve := getGasReserve()
@@ -356,9 +357,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
 
-	header := blocklist.GetHeader(blocklist.GetLastHeight())
-	if header == nil {
-		return "", ce.NewContractError(ce.ErrInitialization, "no block headers available")
+	header, herr := pricingHeader()
+	if herr != nil {
+		return "", herr
 	}
 
 	gasReserve := getGasReserve()
@@ -1002,6 +1003,35 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 // or unmap the account's funds. An L2 tx lists every DID that signed it in
 // RequiredAuths, so a did:pkh signer passes. Mirrors checkAuth in the BTC
 // mapping contract (mapping/utils.go).
+// pricingHeader is the newest stored L1 header, for pricing a new withdrawal.
+//
+// LOW 10: it is refused when it is older than constants.MaxPricingHeaderAge
+// against the L2 block time. A stalled verifier would otherwise price the
+// withdrawal on an old base fee, and an underpriced withdrawal holds the single
+// queue until an admin replaceWithdrawal. A block time the contract cannot read
+// (the node always supplies one) skips the check.
+func pricingHeader() (*blocklist.EthBlockHeader, error) {
+	header := blocklist.GetHeader(blocklist.GetLastHeight())
+	if header == nil {
+		return nil, ce.NewContractError(ce.ErrInitialization, "no block headers available")
+	}
+	if now, ok := blockTime(sdk.GetEnv().Timestamp); ok && now > header.Timestamp && now-header.Timestamp > constants.MaxPricingHeaderAge {
+		return nil, ce.NewContractError(ce.ErrInitialization,
+			"newest L1 header is "+strconv.FormatUint(now-header.Timestamp, 10)+"s old: withdrawals wait until the header feed catches up")
+	}
+	return header, nil
+}
+
+// blockTime parses the L2 block timestamp (Hive's "2006-01-02T15:04:05", UTC).
+func blockTime(ts string) (uint64, bool) {
+	for _, layout := range []string{"2006-01-02T15:04:05", time.RFC3339} {
+		if t, err := time.Parse(layout, ts); err == nil && t.Unix() > 0 {
+			return uint64(t.Unix()), true
+		}
+	}
+	return 0, false
+}
+
 // validIdentity reports whether addr is a Magi identity the runtime recognises
 // (user, key, contract or system address), per the node's system.verify_address.
 func validIdentity(addr string) bool {
@@ -1119,9 +1149,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		return ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
 
-	header := blocklist.GetHeader(blocklist.GetLastHeight())
-	if header == nil {
-		return ce.NewContractError(ce.ErrInitialization, "no block headers available")
+	header, herr := pricingHeader()
+	if herr != nil {
+		return herr
 	}
 
 	// W4 Cluster C CRIT #7: compute gas pricing up front for BOTH paths so

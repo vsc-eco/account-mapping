@@ -143,6 +143,12 @@ const ERC20TransferGas = uint64(65_000)
 // int64) compared against big.Int amounts via big.NewInt at the call site;
 // the unbounded accounting values (balances/supply/amounts) are *big.Int.
 // 0.01 ETH = 10_000_000_000_000_000 wei.
+// MaxPricingHeaderAge (LOW 10): a new withdrawal is priced from the newest L1
+// header only while that header is at most this many seconds older than the L2
+// block time. An hour is ~300 ETH blocks; the 2x base-fee margin covers normal
+// moves over that span, a stalled header feed does not.
+const MaxPricingHeaderAge uint64 = 3600
+
 const MinETHWithdrawal = int64(10_000_000_000_000_000) // 0.01 ETH in WEI
 const MinUSDCWithdrawal = int64(10_000_000)            // 10 USDC in micro-units
 
