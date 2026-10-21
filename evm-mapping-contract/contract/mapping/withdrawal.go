@@ -89,6 +89,10 @@ type PendingSpend struct {
 	// (which charge the fee to the user balance, not the reserve) leave it
 	// nil and absent; JSON marshal/unmarshal carry it automatically.
 	GasCost *big.Int `json:"gas_cost,omitempty"`
+	// Rolled is set by rollWithdrawal (D3): UnsignedTxHex is then a 0-value
+	// self-transfer at Nonce, and confirmSpend accepts either that or the
+	// withdrawal itself, whichever mined.
+	Rolled bool `json:"rolled,omitempty"`
 }
 
 func StorePendingSpend(ps PendingSpend) {

@@ -390,6 +390,19 @@ func cancelMyWithdrawal(input *string) *string {
 	return nil
 }
 
+// rollWithdrawal: D3 escape for a withdrawal that never mines (see
+// mapping.HandleRollWithdrawal). Anyone, after WithdrawalRollWindow L1 blocks.
+//
+//go:wasmexport rollWithdrawal
+func rollWithdrawal(input *string) *string {
+	var params mapping.RollWithdrawalParams
+	unmarshalParams(input, &params)
+	if err := mapping.HandleRollWithdrawal(params.Nonce, vault(), chainId()); err != nil {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
+	}
+	return nil
+}
+
 //go:wasmexport confirmSpendSchema
 func confirmSpendSchema(_ *string) *string {
 	s := mapping.ConfirmSpendSchemaJSON

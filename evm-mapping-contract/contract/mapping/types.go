@@ -168,6 +168,11 @@ type ExpireWithdrawalParams struct {
 	Proof L1ProofOfDrop `json:"proof"`
 }
 
+// RollWithdrawalParams names the confirmed-head withdrawal to roll back (D3).
+type RollWithdrawalParams struct {
+	Nonce uint64 `json:"nonce"`
+}
+
 // CancelMyWithdrawalParams — W4 Cluster E CRIT #26 companion. Proof
 // MANDATORY (must NOT race in-flight L1 tx confirmation).
 type CancelMyWithdrawalParams struct {
