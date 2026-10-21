@@ -409,6 +409,31 @@ func cancelMyWithdrawal(input *string) *string {
 // rollWithdrawal: D3 escape for a withdrawal that never mines (see
 // mapping.HandleRollWithdrawal). Anyone, after WithdrawalRollWindow L1 blocks.
 //
+// E23: the vault goes live once the primary key has shown it can sign
+// (mapping/vaultcheck.go).
+//
+//go:wasmexport requestVaultCheck
+func requestVaultCheck(_ *string) *string {
+	if err := mapping.HandleRequestVaultCheck(chainId()); err != nil {
+		ce.CustomAbort(err)
+	}
+	return nil
+}
+
+type attestVaultParams struct {
+	Signature string `json:"signature"`
+}
+
+//go:wasmexport attestVault
+func attestVault(input *string) *string {
+	var params attestVaultParams
+	unmarshalParams(input, &params)
+	if err := mapping.HandleAttestVault(params.Signature, chainId()); err != nil {
+		ce.CustomAbort(err)
+	}
+	return nil
+}
+
 //go:wasmexport rollWithdrawal
 func rollWithdrawal(input *string) *string {
 	var params mapping.RollWithdrawalParams

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"evm-mapping-contract/contract/constants"
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/sdk"
 )
@@ -15,6 +16,10 @@ func TestA18_VaultComesFromTheTssKey(t *testing.T) {
 	sdk.ResetStubState()
 	defer sdk.ResetStubState()
 	sdk.StubSetTssKey("active,0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,ecdsa")
+	if v := vault(); v != ([20]byte{}) {
+		t.Fatalf("vault() before the key's check signature = %x, want zero (E23)", v)
+	}
+	sdk.StateSetObject(constants.VaultCheckedKey, "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
 	v := vault()
 	if got := crypto.AddressToHex(v); !strings.EqualFold(got, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf") {
 		t.Fatalf("vault() = %s, want the key's address", got)

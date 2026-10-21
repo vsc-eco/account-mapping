@@ -1108,11 +1108,11 @@ func checkAuth(env sdk.Env) error {
 // signing still needs the key active (requireTssKey). The address is cached per
 // public key so the curve math runs once.
 func TssVaultAddress() ([20]byte, bool) {
-	parts := strings.Split(sdk.TssGetKey("primary"), ",")
-	if len(parts) < 3 || (parts[0] != "active" && parts[0] != "deprecated") || parts[2] != "ecdsa" {
+	pubHex, ok := primaryKeyPub(false)
+	// E23: no vault until the key has shown it can sign (vaultcheck.go).
+	if !ok || !vaultVerified(pubHex) {
 		return [20]byte{}, false
 	}
-	pubHex := strings.ToLower(strings.TrimPrefix(parts[1], "0x"))
 	if c := sdk.StateGetObject(constants.VaultKeyCacheKey); c != nil {
 		if i := strings.IndexByte(*c, '|'); i > 0 && (*c)[:i] == pubHex {
 			if addr, err := crypto.HexToAddress((*c)[i+1:]); err == nil {
