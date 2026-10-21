@@ -155,10 +155,22 @@ func contractCall(contractId *string, method *string, payload *string, options *
 }
 
 //go:wasmimport sdk tss_v2.create_key
-func tssCreateKey(keyId *string, algo *string, epochs *string) *string { return nil }
+func tssCreateKey(keyId *string, algo *string, epochs *string) *string {
+	testCreatedKeys = append(testCreatedKeys, *keyId+","+*algo+","+*epochs)
+	r := "created" // the host's answer for a new key
+	return &r
+}
+
+// testCreatedKeys records every tss_v2.create_key call as "id,algo,epochs"
+// (test-only; see TestCreatedKeys).
+var testCreatedKeys []string
+
+// TestCreatedKeys returns the keys requested since the last ResetTestState.
+// Test-only.
+func TestCreatedKeys() []string { return append([]string(nil), testCreatedKeys...) }
 
 //go:wasmimport sdk tss_v2.renew_key
-func tssRenewKey(keyId *string, epochs *string) *string { return nil }
+func tssRenewKey(keyId *string, epochs *string) *string { r := ""; return &r }
 
 //go:wasmimport sdk tss.sign_key
 func tssSignKey(keyId *string, msgId *string) *string { return nil }
@@ -245,6 +257,7 @@ func revert(msg, symbol *string) {
 // default env. Call at the start of every stateful test.
 func ResetTestState() {
 	testLogs = nil
+	testCreatedKeys = nil
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}

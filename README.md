@@ -29,20 +29,19 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 - `unmapETH` — withdraw native ETH to an external address
 - `unmapERC20` — withdraw a registered ERC-20 token
 - `unmapFrom` — withdraw on behalf of a third party via allowance
-- `replaceWithdrawal` — replace a stuck withdrawal tx (e.g. for fee bump)
-- `clearNonce` — reset the contract's EVM nonce tracker after an on-chain rollback
 - `rollWithdrawal` — after 1200 verified L1 blocks, anyone may roll back a withdrawal that never mined: the vault signs a 0-value self-transfer at its nonce, and `confirmSpend` refunds the withdrawer once that mines
+- `expireWithdrawal` / `cancelMyWithdrawal` — release a withdrawal that can no longer complete
 
-**Chain relay:**
-- `addBlocks` — oracle appends new EVM block headers
-- `replaceBlock` — replace the tip header after a reorg
+**Chain relay:** none in this contract. Block headers come from the ZK header verifier contract (`zk-header-verifier`), read through `zkverifier`.
 
-**Admin / owner:**
-- `registerRouter` — register the DEX router contract
-- `registerToken` — whitelist an ERC-20 contract
-- `setChainId` — set the EIP-155 chain ID
-- `setGasReserve` — set the gas buffer retained for withdrawal txs
-- `adminMint` — emergency mint (owner-only)
+**Deploy:**
+- `initContract` — one-shot, the deployer with active authority: `chain_id` (required), `is_testnet`, and optionally `verifier_contract` and `create_key` to wire the header verifier and request the `primary` TSS key at deploy. Set later, both wait out the 400K-block timelock below, so a bridge deployed without them takes ~14 days to accept its first deposit.
+
+**Admin / owner** (`propose`, then `execute` once the timelock has passed; `cancel`, `expireProposal`):
+- ~14 days (400K blocks): `setVerifierContract`, `createKey`, `renewKey`
+- 24 hours: `replaceWithdrawal`, `clearNonce`
+- 6 hours: `registerToken`, `registerRouter`, `registerRelayer`, `deregisterRelayer`, `clearTestnetState`
+- immediate: `pause`, `unpause`
 
 ## Repo Layout
 
