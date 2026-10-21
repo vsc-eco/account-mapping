@@ -2,7 +2,9 @@ package crypto
 
 import (
 	"encoding/hex"
+	"errors"
 	ce "evm-mapping-contract/contract/contracterrors"
+	"math/big"
 	"strings"
 
 	"evm-mapping-contract/sdk"
@@ -77,6 +79,45 @@ func ecrecoverDispatch(
 
 func AddressToHex(addr [20]byte) string {
 	return "0x" + hex.EncodeToString(addr[:])
+}
+
+var (
+	secp256k1P, _  = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
+	secp256k1SqrtE = new(big.Int).Rsh(new(big.Int).Add(secp256k1P, big.NewInt(1)), 2) // (p+1)/4, as p = 3 mod 4
+)
+
+// PubkeyAddress is the Ethereum address of a secp256k1 public key, given as 33
+// compressed bytes (how the node's TSS stores ECDSA keys) or 65 uncompressed
+// bytes (0x04 || X || Y): keccak256(X || Y)[12:]. A compressed key is
+// decompressed on the curve and refused if its X is not on it.
+func PubkeyAddress(pub []byte) ([20]byte, error) {
+	var xy []byte
+	switch {
+	case len(pub) == 65 && pub[0] == 4:
+		xy = pub[1:]
+	case len(pub) == 33 && (pub[0] == 2 || pub[0] == 3):
+		x := new(big.Int).SetBytes(pub[1:])
+		if x.Cmp(secp256k1P) >= 0 {
+			return [20]byte{}, errors.New("public key X out of range")
+		}
+		y2 := new(big.Int).Exp(x, big.NewInt(3), secp256k1P)
+		y2.Add(y2, big.NewInt(7)).Mod(y2, secp256k1P)
+		y := new(big.Int).Exp(y2, secp256k1SqrtE, secp256k1P)
+		if new(big.Int).Exp(y, big.NewInt(2), secp256k1P).Cmp(y2) != 0 {
+			return [20]byte{}, errors.New("public key is not on secp256k1")
+		}
+		if y.Bit(0) != uint(pub[0]&1) {
+			y.Sub(secp256k1P, y)
+		}
+		xy = make([]byte, 64)
+		x.FillBytes(xy[:32])
+		y.FillBytes(xy[32:])
+	default:
+		return [20]byte{}, errors.New("unsupported public key encoding")
+	}
+	var addr [20]byte
+	copy(addr[:], Keccak256(xy)[12:])
+	return addr, nil
 }
 
 // L2IdentityPrefix is the did:pkh namespace the Magi node authenticates

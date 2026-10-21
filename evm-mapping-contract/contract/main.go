@@ -20,12 +20,9 @@ var NetworkMode string
 
 func main() {}
 
+// vault is the L1 address of the TSS primary key (A18); zero until keygen.
 func vault() [20]byte {
-	data := sdk.StateGetObject(constants.VaultAddressKey)
-	if data == nil {
-		return [20]byte{}
-	}
-	addr, _ := crypto.HexToAddress(*data)
+	addr, _ := mapping.TssVaultAddress()
 	return addr
 }
 
@@ -409,27 +406,7 @@ func dispatchAdmin(action string, payload []byte) {
 	switch action {
 
 	// Fund-affecting (Long, 400K blocks)
-	case "setVault":
-		assertNotPaused()
-		addr, perr := decodeAddressPayload(payload)
-		if perr != nil {
-			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: "+perr.Error()))
-		}
-		// RV re-verify (MED-23 correction): decodeAddressPayload only unwraps the
-		// string; it never validated that the result is a real address. A typo'd
-		// setVault would store junk, make vault() return zero (deposits revert),
-		// and — worse — any unmap would snapshot VaultAtQueue=0x0, which
-		// confirmSpend/expireWithdrawal both refuse, wedging the single withdrawal
-		// queue permanently after the 14-day timelock. Validate it is a non-zero
-		// 20-byte address before storing (it also round-trips to canonical 0x-hex).
-		parsed, aerr := crypto.HexToAddress(addr)
-		if aerr != nil {
-			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: not a 20-byte hex address"))
-		}
-		if parsed == ([20]byte{}) {
-			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVault: refusing the zero address"))
-		}
-		sdk.StateSetObject(constants.VaultAddressKey, crypto.AddressToHex(parsed))
+	// setVault was removed (A18): the vault is the TSS primary key's address.
 
 	case "setVerifierContract":
 		assertNotPaused()
@@ -470,15 +447,8 @@ func dispatchAdmin(action string, payload []byte) {
 		sdk.TssRenewKey("primary", 365)
 
 	// Operator-tactical (28.8K blocks, 24h)
-	case "registerPublicKey":
-		assertNotPaused()
-		// MED-23 (M18-D22): reject an empty public key. An empty pubkey silently
-		// degrades any consumer that reads PrimaryPublicKeyKey; fail loud rather
-		// than store a blank trust input.
-		if len(payload) == 0 {
-			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerPublicKey: empty public key"))
-		}
-		sdk.StateSetObject(constants.PrimaryPublicKeyKey, string(payload))
+	// registerPublicKey was removed (A18): it stored a public key nothing read;
+	// the key comes from the TSS group (TssGetKey).
 
 	case "replaceWithdrawal":
 		assertNotPaused()
@@ -607,17 +577,4 @@ func dispatchAdmin(action string, payload []byte) {
 	default:
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "dispatchAdmin: unknown action "+action))
 	}
-}
-
-// decodeAddressPayload — setVault payload is either a JSON-encoded string
-// literal or a plain 0x-prefixed hex byte slice.
-func decodeAddressPayload(payload []byte) (string, error) {
-	if len(payload) == 0 {
-		return "", ce.NewContractError(ce.ErrInput, "empty payload")
-	}
-	var s string
-	if err := json.Unmarshal(payload, &s); err == nil && s != "" {
-		return s, nil
-	}
-	return string(payload), nil
 }

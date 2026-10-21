@@ -295,8 +295,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 
 	// W4 Cluster F D-F-3: snapshot CURRENT vault into VaultAtQueue. When
 	// confirmSpend lands, HandleConfirmSpend ecrecovers against this
-	// snapshot (NOT current vault) — setVault between unmap and
-	// confirmSpend no longer orphans the pending withdrawal (HIGH #29).
+	// snapshot (NOT current vault) — a vault change (TSS key rotation)
+	// between unmap and confirmSpend no longer orphans the pending
+	// withdrawal (HIGH #29).
 	StorePendingSpend(PendingSpend{
 		Nonce:         nonce,
 		Amount:        l1Value, // the L1 tx value — returns to the vault on revert
@@ -445,8 +446,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 
 // HandleConfirmSpend — W4 Cluster F D-F-3 (S-F-v17-2): vaultAddress
 // parameter REMOVED. The handler reads ps.VaultAtQueue directly from
-// the stored PendingSpend (snapshotted at queue time). setVault between
-// unmap and confirmSpend no longer orphans the pending withdrawal —
+// the stored PendingSpend (snapshotted at queue time). A vault change (TSS
+// key rotation) between unmap and confirmSpend no longer orphans the
+// pending withdrawal —
 // the TSS signature targeting the OLD vault still verifies against the
 // OLD vault (HIGH #29 closure).
 //
@@ -518,8 +520,8 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 
 	// CRIT #11 site 6 (SYSTEM, REJECT) + W4 Cluster F D-F-3 (HIGH #29):
 	// vault TSS-sig recovery against ps.VaultAtQueue (snapshot at unmap
-	// time), NOT the current vault. setVault between unmap and confirmSpend
-	// no longer orphans the pending withdrawal.
+	// time), NOT the current vault. A vault change (TSS key rotation) between
+	// unmap and confirmSpend no longer orphans the pending withdrawal.
 	if ps.VaultAtQueue == "" || ps.VaultAtQueue == "0x0000000000000000000000000000000000000000" {
 		return errors.New(
 			"VaultAtQueue is zero — pre-upgrade PendingSpend entry; use clearNonce (with L1-proof-of-drop) or wait for W0 P0 state clearing",
@@ -1057,6 +1059,41 @@ func checkAuth(env sdk.Env) error {
 		return ce.NewContractError(ce.ErrNoPermission, "active auth required to send funds")
 	}
 	return nil
+}
+
+// TssVaultAddress is the L1 address of the contract's "primary" TSS key: the
+// vault.
+//
+// A18: the vault used to be an admin-set address (setVault) that nothing tied
+// to the key the TSS group holds, and the bot only warned on a mismatch. An
+// owner key, or a typo, could point deposits at an address the bridge cannot
+// spend from. Now the bridge holds funds only at the key's own address. A
+// deprecated key still owns its address, so deposits to it keep being credited;
+// signing still needs the key active (requireTssKey). The address is cached per
+// public key so the curve math runs once.
+func TssVaultAddress() ([20]byte, bool) {
+	parts := strings.Split(sdk.TssGetKey("primary"), ",")
+	if len(parts) < 3 || (parts[0] != "active" && parts[0] != "deprecated") || parts[2] != "ecdsa" {
+		return [20]byte{}, false
+	}
+	pubHex := strings.ToLower(strings.TrimPrefix(parts[1], "0x"))
+	if c := sdk.StateGetObject(constants.VaultKeyCacheKey); c != nil {
+		if i := strings.IndexByte(*c, '|'); i > 0 && (*c)[:i] == pubHex {
+			if addr, err := crypto.HexToAddress((*c)[i+1:]); err == nil {
+				return addr, true
+			}
+		}
+	}
+	pub, err := hex.DecodeString(pubHex)
+	if err != nil {
+		return [20]byte{}, false
+	}
+	addr, err := crypto.PubkeyAddress(pub)
+	if err != nil {
+		return [20]byte{}, false
+	}
+	sdk.StateSetObject(constants.VaultKeyCacheKey, pubHex+"|"+crypto.AddressToHex(addr))
+	return addr, true
 }
 
 func requireTssKey() error {

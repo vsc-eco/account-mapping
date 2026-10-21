@@ -39,11 +39,10 @@ const (
 	NonceConfirmedKey       = "n"                    // confirmed nonce
 	NoncePendingKey         = "np"                   // next pending nonce
 	TokenRegistryPrefix     = "t" + DirPathDelimiter // t-{address} → {symbol, decimals}
-	PrimaryPublicKeyKey     = "pubkey"               // TSS primary public key
 	RouterContractIdKey     = "routerid"             // DEX router contract ID
 	PausedKey               = "paused"               // "1" when paused
 	GasReserveKey           = "gr"                   // gas reserve amount (wei — full L1 native precision; big.Int-encoded decimal string)
-	VaultAddressKey         = "vault"                // vault ETH address
+	VaultKeyCacheKey        = "vaultkey"             // A18: "<TSS pubkey hex>|<0x address>", the vault derived from the key
 	ChainIdKey              = "chainid"              // EVM chain ID
 	VerifierContractIdKey   = "zkverifier"           // ZK header verifier contract ID
 	// MED-33 (M23-F16): block height of the most recent replaceWithdrawal.
