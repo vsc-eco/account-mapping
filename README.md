@@ -16,6 +16,8 @@ Chain selection is compile-time via the `NetworkMode` ldflag and runtime via `se
 
 The contract verifies on-chain deposit proofs (receipt-trie inclusion against a stored block header) and credits the depositor's VSC account with a wrapped token balance. Withdrawals (unmapping) construct and TSS-sign an EVM transaction, returning funds to the user's external address.
 
+The vault, the L1 address that holds mapped funds, is the Ethereum address of the contract's `primary` TSS key; there is no admin setting for it.
+
 ## Contract Actions
 
 **Deposit & transfer:**
@@ -29,16 +31,15 @@ The contract verifies on-chain deposit proofs (receipt-trie inclusion against a 
 - `unmapFrom` — withdraw on behalf of a third party via allowance
 - `replaceWithdrawal` — replace a stuck withdrawal tx (e.g. for fee bump)
 - `clearNonce` — reset the contract's EVM nonce tracker after an on-chain rollback
+- `rollWithdrawal` — after 1200 verified L1 blocks, anyone may roll back a withdrawal that never mined: the vault signs a 0-value self-transfer at its nonce, and `confirmSpend` refunds the withdrawer once that mines
 
 **Chain relay:**
 - `addBlocks` — oracle appends new EVM block headers
 - `replaceBlock` — replace the tip header after a reorg
 
 **Admin / owner:**
-- `registerPublicKey` — register TSS primary + backup keys
 - `registerRouter` — register the DEX router contract
 - `registerToken` — whitelist an ERC-20 contract
-- `setVault` — set the 20-byte EVM vault address holding mapped funds
 - `setChainId` — set the EIP-155 chain ID
 - `setGasReserve` — set the gas buffer retained for withdrawal txs
 - `adminMint` — emergency mint (owner-only)
