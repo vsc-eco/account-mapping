@@ -16,7 +16,7 @@ var (
 	_ tinyjson.Marshaler
 )
 
-func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp(in *jlexer.Lexer, out *EnvMap) {
+func tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp(in *jlexer.Lexer, out *EnvMap) {
 	isTopLevel := in.IsStart()
 	if in.IsNull() {
 		in.Skip()
@@ -43,7 +43,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp(in *jlexer.Lexer, ou
 		in.Consumed()
 	}
 }
-func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp(out *jwriter.Writer, in EnvMap) {
+func tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp(out *jwriter.Writer, in EnvMap) {
 	if in == nil && (out.Flags&jwriter.NilMapAsEmpty) == 0 {
 		out.RawString(`null`)
 	} else {
@@ -71,14 +71,14 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp(out *jwriter.Writer,
 
 // MarshalTinyJSON supports tinyjson.Marshaler interface
 func (v EnvMap) MarshalTinyJSON(w *jwriter.Writer) {
-	tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp(w, v)
+	tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp(w, v)
 }
 
 // UnmarshalTinyJSON supports tinyjson.Unmarshaler interface
 func (v *EnvMap) UnmarshalTinyJSON(l *jlexer.Lexer) {
-	tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp(l, v)
+	tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp(l, v)
 }
-func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp1(in *jlexer.Lexer, out *Env) {
+func tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp1(in *jlexer.Lexer, out *Env) {
 	isTopLevel := in.IsStart()
 	if in.IsNull() {
 		if isTopLevel {
@@ -112,7 +112,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp1(in *jlexer.Lexer, o
 		case "block.timestamp":
 			out.Timestamp = string(in.String())
 		case "sender":
-			tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp2(in, &out.Sender)
+			tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp2(in, &out.Sender)
 		case "msg.caller":
 			out.Caller = Address(in.String())
 		case "msg.payer":
@@ -134,7 +134,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp1(in *jlexer.Lexer, o
 				}
 				for !in.IsDelim(']') {
 					var v3 Intent
-					tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp3(in, &v3)
+					tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp3(in, &v3)
 					out.Intents = append(out.Intents, v3)
 					in.WantComma()
 				}
@@ -150,7 +150,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp1(in *jlexer.Lexer, o
 		in.Consumed()
 	}
 }
-func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp1(out *jwriter.Writer, in Env) {
+func tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp1(out *jwriter.Writer, in Env) {
 	out.RawByte('{')
 	first := true
 	_ = first
@@ -192,7 +192,7 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp1(out *jwriter.Writer
 	{
 		const prefix string = ",\"sender\":"
 		out.RawString(prefix)
-		tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp2(out, in.Sender)
+		tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp2(out, in.Sender)
 	}
 	{
 		const prefix string = ",\"msg.caller\":"
@@ -215,7 +215,7 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp1(out *jwriter.Writer
 				if v4 > 0 {
 					out.RawByte(',')
 				}
-				tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp3(out, v5)
+				tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp3(out, v5)
 			}
 			out.RawByte(']')
 		}
@@ -225,14 +225,14 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp1(out *jwriter.Writer
 
 // MarshalTinyJSON supports tinyjson.Marshaler interface
 func (v Env) MarshalTinyJSON(w *jwriter.Writer) {
-	tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp1(w, v)
+	tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp1(w, v)
 }
 
 // UnmarshalTinyJSON supports tinyjson.Unmarshaler interface
 func (v *Env) UnmarshalTinyJSON(l *jlexer.Lexer) {
-	tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp1(l, v)
+	tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp1(l, v)
 }
-func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp3(in *jlexer.Lexer, out *Intent) {
+func tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp3(in *jlexer.Lexer, out *Intent) {
 	isTopLevel := in.IsStart()
 	if in.IsNull() {
 		if isTopLevel {
@@ -279,7 +279,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp3(in *jlexer.Lexer, o
 		in.Consumed()
 	}
 }
-func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp3(out *jwriter.Writer, in Intent) {
+func tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp3(out *jwriter.Writer, in Intent) {
 	out.RawByte('{')
 	first := true
 	_ = first
@@ -311,7 +311,7 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp3(out *jwriter.Writer
 	}
 	out.RawByte('}')
 }
-func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp2(in *jlexer.Lexer, out *Sender) {
+func tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp2(in *jlexer.Lexer, out *Sender) {
 	isTopLevel := in.IsStart()
 	if in.IsNull() {
 		if isTopLevel {
@@ -388,7 +388,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp2(in *jlexer.Lexer, o
 		in.Consumed()
 	}
 }
-func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp2(out *jwriter.Writer, in Sender) {
+func tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp2(out *jwriter.Writer, in Sender) {
 	out.RawByte('{')
 	first := true
 	_ = first
@@ -431,7 +431,7 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp2(out *jwriter.Writer
 	}
 	out.RawByte('}')
 }
-func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp4(in *jlexer.Lexer, out *ContractCallOptions) {
+func tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp4(in *jlexer.Lexer, out *ContractCallOptions) {
 	isTopLevel := in.IsStart()
 	if in.IsNull() {
 		if isTopLevel {
@@ -467,12 +467,14 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp4(in *jlexer.Lexer, o
 				}
 				for !in.IsDelim(']') {
 					var v14 Intent
-					tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp3(in, &v14)
+					tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp3(in, &v14)
 					out.Intents = append(out.Intents, v14)
 					in.WantComma()
 				}
 				in.Delim(']')
 			}
+		case "try":
+			out.Try = bool(in.Bool())
 		default:
 			in.SkipRecursive()
 		}
@@ -483,7 +485,7 @@ func tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp4(in *jlexer.Lexer, o
 		in.Consumed()
 	}
 }
-func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp4(out *jwriter.Writer, in ContractCallOptions) {
+func tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp4(out *jwriter.Writer, in ContractCallOptions) {
 	out.RawByte('{')
 	first := true
 	_ = first
@@ -497,20 +499,30 @@ func tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp4(out *jwriter.Writer
 				if v15 > 0 {
 					out.RawByte(',')
 				}
-				tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp3(out, v16)
+				tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp3(out, v16)
 			}
 			out.RawByte(']')
 		}
+	}
+	if in.Try {
+		const prefix string = ",\"try\":"
+		if first {
+			first = false
+			out.RawString(prefix[1:])
+		} else {
+			out.RawString(prefix)
+		}
+		out.Bool(bool(in.Try))
 	}
 	out.RawByte('}')
 }
 
 // MarshalTinyJSON supports tinyjson.Marshaler interface
 func (v ContractCallOptions) MarshalTinyJSON(w *jwriter.Writer) {
-	tinyjson223cdf42EncodeBtcMappingContractSdkTinyjsonTmp4(w, v)
+	tinyjson223cdf42EncodeEvmMappingContractSdkTinyjsonTmp4(w, v)
 }
 
 // UnmarshalTinyJSON supports tinyjson.Unmarshaler interface
 func (v *ContractCallOptions) UnmarshalTinyJSON(l *jlexer.Lexer) {
-	tinyjson223cdf42DecodeBtcMappingContractSdkTinyjsonTmp4(l, v)
+	tinyjson223cdf42DecodeEvmMappingContractSdkTinyjsonTmp4(l, v)
 }
