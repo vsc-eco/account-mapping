@@ -196,6 +196,9 @@ type DexInstruction struct {
 	AssetOut         string `json:"asset_out"`
 	Recipient        string `json:"recipient"`
 	DestinationChain string `json:"destination_chain"`
+	// A8 (DX-H5 on BTC): the depositor's slippage floor, passed to the router
+	// unchanged; the router and the DEX enforce it.
+	MinAmountOut *string `json:"min_amount_out,omitempty"`
 }
 
 // Parsed receipt log
