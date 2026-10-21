@@ -298,7 +298,7 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	// snapshot (NOT current vault) — a vault change (TSS key rotation)
 	// between unmap and confirmSpend no longer orphans the pending
 	// withdrawal (HIGH #29).
-	StorePendingSpend(PendingSpend{
+	ps := PendingSpend{
 		Nonce:         nonce,
 		Amount:        l1Value, // the L1 tx value — returns to the vault on revert
 		From:          caller,
@@ -308,7 +308,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		BlockHeight:   blocklist.GetLastHeight(),
 		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
 		GasCost:       fee, // prepaid L1 fee — refunded with Amount if the tx is proven dropped
-	})
+	}
+	StorePendingSpend(ps)
+	logUnmap(ps, userDebit, true)
 	SetPendingNonce(nonce + 1)
 
 	return hex.EncodeToString(unsigned), nil
@@ -427,7 +429,7 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	TrackReserveSpend(gasCost)
 
 	// W4 Cluster F D-F-3: snapshot vault for ERC-20 path too.
-	StorePendingSpend(PendingSpend{
+	ps := PendingSpend{
 		Nonce:         nonce,
 		Amount:        amount,
 		From:          caller,
@@ -438,10 +440,30 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		BlockHeight:   blocklist.GetLastHeight(),
 		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
 		GasCost:       gasCost, // wei reserve deducted; refunded on failed receipt (EVM-C4)
-	})
+	}
+	StorePendingSpend(ps)
+	logUnmap(ps, amount, false)
 	SetPendingNonce(nonce + 1)
 
 	return hex.EncodeToString(unsigned), nil
+}
+
+// logUnmap emits the unmap event (A12). Parity with the BTC mapping contract's
+// "unmap|..." / "fee|..." logs, which the indexer parses as pipe-delimited
+// key=value fields: n the withdrawal nonce, f the debited account, t the L1
+// recipient, a the asset, d the L2 debit, s the value sent on L1, g the L1 gas
+// charged, gs who paid it (user: inside d; reserve: the gas reserve).
+func logUnmap(ps PendingSpend, debited *big.Int, gasFromUser bool) {
+	gasSource := "reserve"
+	if gasFromUser {
+		gasSource = "user"
+	}
+	gas := "0"
+	if ps.GasCost != nil {
+		gas = ps.GasCost.String()
+	}
+	sdk.Log("unmap|n=" + strconv.FormatUint(ps.Nonce, 10) + "|f=" + ps.From + "|t=" + ps.To + "|a=" + ps.Asset +
+		"|d=" + debited.String() + "|s=" + ps.Amount.String() + "|g=" + gas + "|gs=" + gasSource)
 }
 
 // HandleConfirmSpend — W4 Cluster F D-F-3 (S-F-v17-2): vaultAddress
@@ -1358,7 +1380,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	sdk.TssSignKey("primary", sighash)
 
 	// W4 Cluster F D-F-3: snapshot vault for HandleUnmapFrom path.
-	StorePendingSpend(PendingSpend{
+	ps := PendingSpend{
 		Nonce:         nonce,
 		Amount:        l1Value, // ETH: L1 tx value (== amount for ERC-20)
 		From:          params.From,
@@ -1369,7 +1391,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		BlockHeight:   blocklist.GetLastHeight(),
 		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
 		GasCost:       pendingGasCost, // prepaid fee (ETH) / reserve charge (ERC-20); restored on proven drop
-	})
+	}
+	StorePendingSpend(ps)
+	logUnmap(ps, userDebit, params.Asset == "eth")
 	SetPendingNonce(nonce + 1)
 	return nil
 }

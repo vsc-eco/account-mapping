@@ -14,7 +14,14 @@ import (
 //go:wasmimport sdk console.log
 func log(s *string) *string { return nil }
 
+// testLogs records every Log line (test-only; see TestLogs).
+var testLogs []string
+
+// TestLogs returns the lines logged since the last ResetTestState. Test-only.
+func TestLogs() []string { return append([]string(nil), testLogs...) }
+
 func Log(s string) {
+	testLogs = append(testLogs, s)
 	log(&s)
 }
 
@@ -237,6 +244,7 @@ func revert(msg, symbol *string) {
 // ResetTestState clears in-memory contract state and restores the
 // default env. Call at the start of every stateful test.
 func ResetTestState() {
+	testLogs = nil
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}
