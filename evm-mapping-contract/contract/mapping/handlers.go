@@ -543,6 +543,20 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		return ce.NewContractError(ce.ErrTransaction, "tx not signed by vault at queue time")
 	}
 
+	// D3: on a rolled withdrawal the roll (a 0-value self-transfer at the same
+	// nonce) may be what mined. The vault's nonce is then spent, so the
+	// withdrawal can never mine, and its value goes back to the withdrawer. A
+	// withdrawal itself is never a 0-value transfer to the vault (an ETH one
+	// carries its amount, an ERC-20 one goes to the token).
+	if ps.Rolled && parsedTx.To == snapshottedVault && new(big.Int).SetBytes(parsedTx.Value).Sign() == 0 {
+		refundDroppedWithdrawal(ps)
+		DeletePendingSpend(confirmedNonce)
+		SetConfirmedNonce(confirmedNonce + 1)
+		sdk.Log("withdrawal_lifecycle " + `{"action":"rolledBack","nonce":` + strconv.FormatUint(confirmedNonce, 10) +
+			`,"from":"` + ps.From + `","amount":"` + ps.Amount.String() + `","asset":"` + ps.Asset + `"}`)
+		return nil
+	}
+
 	psTo, err := crypto.HexToAddress(ps.To)
 	if err != nil {
 		return ce.Prepend(err, "pending spend destination")
@@ -1436,6 +1450,9 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	if ps == nil {
 		return ce.NewContractError(ce.ErrIntent, "no pending withdrawal to replace", "replaceWithdrawal")
 	}
+	if ps.Rolled {
+		return ce.NewContractError(ce.ErrIntent, "the withdrawal is being rolled back (rollWithdrawal)", "replaceWithdrawal")
+	}
 
 	// MED-33 (M23-F16): rate-limit replaceWithdrawal so it cannot spam
 	// unbounded TSS signing requests. Each call invokes sdk.TssSignKey; the
@@ -1648,13 +1665,12 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 	// lagged could be refunded on L2 (double-spend). The window governs only
 	// WHO may call, never WHETHER proof is required.
 	//
-	// NOTE (follow-up, not this fix): a genuinely-stuck/never-broadcast
-	// withdrawal (vault nonce never advanced) cannot produce a type-A/B proof
-	// and therefore cannot be expired here — it requires a dedicated
-	// TSS-nonce-roll recovery (consume slot N with a 0-value self-transfer,
-	// THEN refund) so the original tx becomes permanently unmineable. A naive
+	// A genuinely-stuck/never-broadcast withdrawal (vault nonce never
+	// advanced) cannot produce a type-A/B proof and therefore cannot be
+	// expired here; rollWithdrawal (D3) is its escape: it consumes slot N with
+	// a 0-value self-transfer and refunds only once that has mined. A naive
 	// "nonce-not-advanced" account proof is NOT safe: an in-flight tx can mine
-	// after any proof block, reopening the double-spend. Tracked separately.
+	// after any proof block, reopening the double-spend.
 	if proof.Type == "" {
 		return errors.New("expireWithdrawal: L1-proof-of-drop is mandatory (proves the L1 tx did not execute)")
 	}
@@ -1731,6 +1747,74 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 			10,
 		) + `,"from":"` + ps.From + `","proof_type":"` + proof.Type + `"}`,
 	)
+	return nil
+}
+
+// HandleRollWithdrawal is the escape for a withdrawal that never mines (D3):
+// TSS never signed it, nobody broadcast it, or it is priced out. The queue has
+// one head, so such a withdrawal used to block every later one: the other
+// escapes all need a Type-A proof, i.e. the withdrawal mined and reverted.
+//
+// Once the verified L1 chain is WithdrawalRollWindow blocks past the block the
+// withdrawal was queued at, anyone may roll it: the TSS key signs a 0-value
+// self-transfer from the vault at the withdrawal's nonce, which becomes the
+// tx the bot broadcasts. Only one tx can mine at that nonce. If the withdrawal
+// mines, confirmSpend settles it as usual; if the roll mines, confirmSpend
+// refunds the value to the withdrawer. Nothing is refunded before an L1 proof
+// of which one mined, so the roll cannot double-spend. Like replaceWithdrawal
+// it can be repeated after ReplaceWithdrawalCooldown, to re-price the roll.
+func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) error {
+	if isPaused() {
+		return ce.NewContractError(ce.ErrIntent, "contract is paused")
+	}
+	confirmedNonce := GetConfirmedNonce()
+	if nonce != confirmedNonce {
+		return errors.New("rollWithdrawal: target nonce is not the confirmed-nonce head")
+	}
+	ps := GetPendingSpend(confirmedNonce)
+	if ps == nil {
+		return errors.New("no pending spend at nonce")
+	}
+	snapshottedVault, err := crypto.HexToAddress(ps.VaultAtQueue)
+	if err != nil || snapshottedVault == ([20]byte{}) {
+		return errors.New("legacy PendingSpend entry — clear via admin clearNonce/state procedure")
+	}
+	// The roll must come from the address the withdrawal would spend from.
+	if vaultAddress != snapshottedVault {
+		return errors.New("rollWithdrawal: the TSS key no longer holds the vault this withdrawal was queued from")
+	}
+	if err := requireTssKey(); err != nil {
+		return err
+	}
+	if last := blocklist.GetLastHeight(); last < ps.BlockHeight+constants.WithdrawalRollWindow {
+		return errors.New("rollWithdrawal: the withdrawal was queued at L1 block " + strconv.FormatUint(ps.BlockHeight, 10) +
+			"; it can be rolled from L1 block " + strconv.FormatUint(ps.BlockHeight+constants.WithdrawalRollWindow, 10))
+	}
+	env := sdk.GetEnv()
+	cooldownKey := constants.ReplaceWithdrawalLastKey + strconv.FormatUint(confirmedNonce, 10)
+	if last := sdk.StateGetObject(cooldownKey); last != nil {
+		lastH, _ := strconv.ParseUint(*last, 10, 64)
+		if env.BlockHeight < lastH+constants.ReplaceWithdrawalCooldown {
+			return errors.New("rollWithdrawal: cooldown not elapsed since the last re-sign")
+		}
+	}
+	header, err := pricingHeader()
+	if err != nil {
+		return err
+	}
+	gasTipCap := uint64(4_000_000_000)
+	gasFeeCap, _, feeErr := safeGasFee(0, header.BaseFeePerGas, 3, gasTipCap)
+	if feeErr != nil {
+		return ce.NewContractError(ce.ErrArithmetic, "gas fee cap overflow", "rollWithdrawal")
+	}
+	unsigned := BuildETHWithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, snapshottedVault, big.NewInt(0))
+	sdk.TssSignKey("primary", ComputeSighash(unsigned))
+	sdk.StateSetObject(cooldownKey, strconv.FormatUint(env.BlockHeight, 10))
+	ps.Rolled = true
+	ps.UnsignedTxHex = hex.EncodeToString(unsigned)
+	StorePendingSpend(*ps)
+	sdk.Log("withdrawal_lifecycle " + `{"action":"rollWithdrawal","nonce":` + strconv.FormatUint(confirmedNonce, 10) +
+		`,"from":"` + ps.From + `","caller":"` + env.Caller.String() + `"}`)
 	return nil
 }
 

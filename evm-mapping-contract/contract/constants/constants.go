@@ -165,6 +165,12 @@ const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum r
 // WithdrawalExpiryWindow with an L1-proof-of-drop per D-E-4.
 const WithdrawalExpiryWindow uint64 = 5000
 
+// D3: L1 blocks (of the verified header chain) after the withdrawal was queued
+// before anyone may roll it back with rollWithdrawal: 1200 blocks, about 4
+// hours at 12 s. PendingSpend.BlockHeight is an L1 height, so the window is
+// counted in L1 blocks against blocklist.GetLastHeight().
+const WithdrawalRollWindow uint64 = 1200
+
 // MED-33 (M23-F16): minimum number of Hive blocks between two consecutive
 // replaceWithdrawal executions. replaceWithdrawal calls sdk.TssSignKey on
 // every invocation; without a cooldown, repeated execution burns TSS signing
