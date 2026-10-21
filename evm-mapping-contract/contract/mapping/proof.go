@@ -523,15 +523,15 @@ func splitProofNodes(data []byte) [][]byte {
 	// proof) would reject the proof and the deposit would become permanently
 	// unprovable — funds stuck on L1.
 	//
-	// The REAL ingress bound on the whole proof blob is MAX_TX_SIZE = 16384
-	// bytes, enforced by the transaction-pool in go-vsc-node (a contract call
-	// carrying this proof is itself an L2 tx and is rejected before execution if
-	// it exceeds MAX_TX_SIZE). The earlier comment's "20 * 64 KB / maxItemSize=
+	// The REAL ingress bound on the whole proof blob is the node's contract-
+	// payload cap, MAX_CONTRACT_PAYLOAD_SIZE = 8192 bytes, which every node
+	// checks before execution (go-vsc-node state-processing); it is below the
+	// transaction pool's MAX_TX_SIZE = 16384 (EVM-T1). The earlier comment's "20 * 64 KB / maxItemSize=
 	// 65536" framing was WRONG: the RLP codec's per-item maxItemSize=65536 is an
 	// internal codec ceiling, not the DoS bound — no proof blob admitted to the
-	// contract can approach 20*64 KB because the entire enclosing tx is capped at
-	// 16 KB upstream. The COUNT cap (20) stays as the in-contract bound that
-	// limits per-call verify work; MAX_TX_SIZE bounds the total bytes.
+	// contract can approach 20*64 KB because the payload is capped at 8 KB
+	// upstream. The COUNT cap (20) stays as the in-contract bound that limits
+	// per-call verify work; the payload cap bounds the total bytes.
 	nodes := make([][]byte, 0)
 	offset := 0
 	for offset < len(data) {

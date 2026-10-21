@@ -26,6 +26,7 @@ package mapping
 //	                           documented as deferred.
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"evm-mapping-contract/contract/constants"
 	"evm-mapping-contract/contract/crypto"
@@ -281,9 +282,11 @@ func TestReview6_H10_EarlyGuards(t *testing.T) {
 // past the receipt-trie verify (with a hand-built single-leaf MPT) so the
 // new H10 guards on the tx-trie binding can be observed firing one-by-one:
 //
-//	(g1) TxAtIndexHex empty                  → "Type A requires tx_at_index_hex..."
-//	(g2) TxAtIndexHex set, TxProofHex empty  → "Type A requires tx_proof_hex..."
-//	(g3) TxAtIndexHex+TxProofHex set to junk → "tx proof verification failed"
+//	(g1) TxProof empty   → "Type A requires tx_proof..."
+//	(g3) TxProof is junk → "tx proof verification failed"
+//
+// (g2 checked a separately sent tx_at_index_hex; since EVM-T1 the tx is the
+// tx proof's leaf and is not sent on its own.)
 //
 // The DEEP positive cases (nonce mismatch / chain mismatch / sender
 // mismatch) need ALSO a valid tx-trie proof at the same TxIndex AND a
@@ -331,46 +334,33 @@ func TestReview6_H10_TypeADeepGuards(t *testing.T) {
 		VaultAtQueue: "0x1111111111111111111111111111111111111111",
 	}
 
-	// Concatenate proof nodes into a single hex blob — handlers' splitProofNodes
+	// Concatenate proof nodes into a single blob: handlers' splitProofNodes
 	// re-decodes a stream of RLP items.
-	receiptProofHex := hex.EncodeToString(concatBytes(receiptProofNodes))
-	receiptHex := hex.EncodeToString(receiptBytes)
+	receiptProof := base64.StdEncoding.EncodeToString(concatBytes(receiptProofNodes))
 
 	baseProof := L1ProofOfDrop{
-		Type:            L1ProofTypeRevertedReceipt,
-		BlockHeight:     proofBlock,
-		TxIndex:         txIndex,
-		TxNonce:         txNonce,
-		ReceiptHex:      receiptHex,
-		ReceiptProofHex: receiptProofHex,
+		Type:         L1ProofTypeRevertedReceipt,
+		BlockHeight:  proofBlock,
+		TxIndex:      txIndex,
+		TxNonce:      txNonce,
+		ReceiptProof: receiptProof,
 	}
 
-	t.Run("g1_tx_at_index_hex_empty", func(t *testing.T) {
+	t.Run("g1_tx_proof_empty", func(t *testing.T) {
 		p := baseProof
-		// TxAtIndexHex deliberately blank → H10 guard #1.
+		// TxProof deliberately blank → H10 guard #1.
 		err := verifyL1ProofOfDrop(&p, ps, chainId)
-		if err == nil || !strings.Contains(err.Error(), "Type A requires tx_at_index_hex") {
-			t.Fatalf("H10 g1: expected tx_at_index_hex guard, got %v", err)
-		}
-	})
-
-	t.Run("g2_tx_proof_hex_empty", func(t *testing.T) {
-		p := baseProof
-		p.TxAtIndexHex = "02" // any non-empty hex passes the decode-and-len-check
-		// TxProofHex deliberately blank → H10 guard #2.
-		err := verifyL1ProofOfDrop(&p, ps, chainId)
-		if err == nil || !strings.Contains(err.Error(), "Type A requires tx_proof_hex") {
-			t.Fatalf("H10 g2: expected tx_proof_hex guard, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "Type A requires tx_proof") {
+			t.Fatalf("H10 g1: expected tx_proof guard, got %v", err)
 		}
 	})
 
 	t.Run("g3_tx_proof_garbage_rejected", func(t *testing.T) {
 		p := baseProof
-		// Both fields non-empty, but the tx-trie proof does NOT anchor to
-		// the header's (zero) TransactionsRoot. Should bottom out at H10's
+		// The tx-trie proof does NOT anchor to the header's (zero)
+		// TransactionsRoot. Should bottom out at H10's
 		// "tx proof verification failed".
-		p.TxAtIndexHex = "02"
-		p.TxProofHex = "c0c0"
+		p.TxProof = base64.StdEncoding.EncodeToString([]byte{0xc0, 0xc0})
 		err := verifyL1ProofOfDrop(&p, ps, chainId)
 		if err == nil || !strings.Contains(err.Error(), "tx proof verification failed") {
 			t.Fatalf("H10 g3: expected tx proof verification failed, got %v", err)
@@ -401,8 +391,7 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 	// Receipt setup (re-use shape from g1/g2/g3).
 	receiptBytes := buildRevertedReceiptRLP()
 	receiptsRoot, receiptNodes := buildSingleLeafMPT(receiptBytes)
-	receiptProofHex := hex.EncodeToString(concatBytes(receiptNodes))
-	receiptHex := hex.EncodeToString(receiptBytes)
+	receiptProof := base64.StdEncoding.EncodeToString(concatBytes(receiptNodes))
 
 	// Build the tx we want anchored at TxIndex=1 and seed both roots into
 	// the verifier-mock header.
@@ -416,7 +405,7 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 	}
 
 	t.Run("g4_chain_id_mismatch", func(t *testing.T) {
-		txBytes, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ 9999 /*nonce=*/, 7)
+		_, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ 9999 /*nonce=*/, 7)
 		hdr := serializeHeader(proofBlock, contractChainId, [32]byte{}, txRoot, receiptsRoot)
 		hdrKey := constants.BlockPrefix + uintToStr(proofBlock)
 		sdk.StateSetObject(constants.VerifierContractIdKey, "vsc1verifierstub")
@@ -432,14 +421,12 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 			VaultAtQueue: knownAddrHex,
 		}
 		p := L1ProofOfDrop{
-			Type:            L1ProofTypeRevertedReceipt,
-			BlockHeight:     proofBlock,
-			TxIndex:         txIndex,
-			TxNonce:         7,
-			ReceiptHex:      receiptHex,
-			ReceiptProofHex: receiptProofHex,
-			TxAtIndexHex:    hex.EncodeToString(txBytes),
-			TxProofHex:      hex.EncodeToString(concatBytes(txNodes)),
+			Type:         L1ProofTypeRevertedReceipt,
+			BlockHeight:  proofBlock,
+			TxIndex:      txIndex,
+			TxNonce:      7,
+			ReceiptProof: receiptProof,
+			TxProof:      base64.StdEncoding.EncodeToString(concatBytes(txNodes)),
 		}
 		err := verifyL1ProofOfDrop(&p, ps, contractChainId)
 		if err == nil || !strings.Contains(err.Error(), "proof tx chain id mismatch") {
@@ -451,7 +438,7 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 		// proof.TxNonce matches ps.Nonce (so the early guard passes) but
 		// the SIGNED tx anchored to the trie has a different nonce —
 		// exactly the forgery class H10 was added to close.
-		txBytes, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ contractChainId /*signedNonce=*/, 13)
+		_, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ contractChainId /*signedNonce=*/, 13)
 		hdr := serializeHeader(proofBlock, contractChainId, [32]byte{}, txRoot, receiptsRoot)
 		hdrKey := constants.BlockPrefix + uintToStr(proofBlock)
 		sdk.StateSetObject(constants.VerifierContractIdKey, "vsc1verifierstub")
@@ -467,14 +454,12 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 			VaultAtQueue: knownAddrHex,
 		}
 		p := L1ProofOfDrop{
-			Type:            L1ProofTypeRevertedReceipt,
-			BlockHeight:     proofBlock,
-			TxIndex:         txIndex,
-			TxNonce:         7,
-			ReceiptHex:      receiptHex,
-			ReceiptProofHex: receiptProofHex,
-			TxAtIndexHex:    hex.EncodeToString(txBytes),
-			TxProofHex:      hex.EncodeToString(concatBytes(txNodes)),
+			Type:         L1ProofTypeRevertedReceipt,
+			BlockHeight:  proofBlock,
+			TxIndex:      txIndex,
+			TxNonce:      7,
+			ReceiptProof: receiptProof,
+			TxProof:      base64.StdEncoding.EncodeToString(concatBytes(txNodes)),
 		}
 		err := verifyL1ProofOfDrop(&p, ps, contractChainId)
 		if err == nil || !strings.Contains(err.Error(), "proven tx nonce does not match") {
@@ -486,7 +471,7 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 		// Everything matches EXCEPT ps.VaultAtQueue is set to a different
 		// address than the signer of the proven tx. Pre-fix this would
 		// silently pass; post-fix it must reject with the new sender guard.
-		txBytes, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ contractChainId /*signedNonce=*/, 7)
+		_, txRoot, txNodes := buildAnchoredTx( /*chainId=*/ contractChainId /*signedNonce=*/, 7)
 		hdr := serializeHeader(proofBlock, contractChainId, [32]byte{}, txRoot, receiptsRoot)
 		hdrKey := constants.BlockPrefix + uintToStr(proofBlock)
 		sdk.StateSetObject(constants.VerifierContractIdKey, "vsc1verifierstub")
@@ -502,14 +487,12 @@ func TestReview6_H10_TypeADeepNonceChainSender(t *testing.T) {
 			VaultAtQueue: "0x2222222222222222222222222222222222222222", // != knownAddr
 		}
 		p := L1ProofOfDrop{
-			Type:            L1ProofTypeRevertedReceipt,
-			BlockHeight:     proofBlock,
-			TxIndex:         txIndex,
-			TxNonce:         7,
-			ReceiptHex:      receiptHex,
-			ReceiptProofHex: receiptProofHex,
-			TxAtIndexHex:    hex.EncodeToString(txBytes),
-			TxProofHex:      hex.EncodeToString(concatBytes(txNodes)),
+			Type:         L1ProofTypeRevertedReceipt,
+			BlockHeight:  proofBlock,
+			TxIndex:      txIndex,
+			TxNonce:      7,
+			ReceiptProof: receiptProof,
+			TxProof:      base64.StdEncoding.EncodeToString(concatBytes(txNodes)),
 		}
 		err := verifyL1ProofOfDrop(&p, ps, contractChainId)
 		if err == nil || !strings.Contains(err.Error(), "proven tx sender does not match vault-at-queue") {

@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -480,23 +481,17 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	}
 
 	// --- Transaction proof: verify the tx matches the pending spend ---
-	txBytes, err := hex.DecodeString(req.TxHex)
+	// EVM-T1: the tx is the proof's leaf, so it is not sent on its own.
+	txProofBytes, err := base64.StdEncoding.DecodeString(req.TxProof)
 	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_hex")
-	}
-	txProofBytes, err := hex.DecodeString(req.TxProofHex)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_proof_hex")
+		return ce.WrapContractError(ce.ErrInput, err, "tx_proof is not base64")
 	}
 
 	txProof := splitProofNodes(txProofBytes)
 	txKey := rlp.EncodeUint64(req.TxIndex)
-	provenTx, err := mpt.VerifyProof(header.TransactionsRoot, txKey, txProof)
+	txBytes, err := mpt.VerifyProof(header.TransactionsRoot, txKey, txProof)
 	if err != nil {
 		return ce.Prepend(err, "tx proof")
-	}
-	if !bytesEqual(provenTx, txBytes) {
-		return ce.NewContractError(ce.ErrTransaction, "tx does not match proof")
 	}
 
 	parsedTx, err := parseTransaction(txBytes)
@@ -582,23 +577,17 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	}
 
 	// --- Receipt proof: determine success or failure ---
-	receiptBytes, err := hex.DecodeString(req.ReceiptHex)
+	// EVM-T1: the receipt is the proof's leaf, so it is not sent on its own.
+	receiptProofBytes, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
 	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_hex")
-	}
-	receiptProofBytes, err := hex.DecodeString(req.ReceiptProofHex)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_proof_hex")
+		return ce.WrapContractError(ce.ErrInput, err, "receipt_proof is not base64")
 	}
 
 	receiptProof := splitProofNodes(receiptProofBytes)
 	receiptKey := rlp.EncodeUint64(req.TxIndex)
-	provenReceipt, err := mpt.VerifyProof(header.ReceiptsRoot, receiptKey, receiptProof)
+	receiptBytes, err := mpt.VerifyProof(header.ReceiptsRoot, receiptKey, receiptProof)
 	if err != nil {
 		return ce.Prepend(err, "receipt proof")
-	}
-	if !bytesEqual(provenReceipt, receiptBytes) {
-		return ce.NewContractError(ce.ErrTransaction, "receipt does not match proof")
 	}
 
 	receiptToParse := receiptBytes
@@ -1659,24 +1648,18 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 		// path (clearNonce, cancelMyWithdrawal, pre-window expireWithdrawal).
 		// Now the tx-trie proof cryptographically binds the nonce + sender
 		// to the proven L1 slot, closing the forgery class.
-		receiptBytes, err := hex.DecodeString(proof.ReceiptHex)
+		// EVM-T1: base64 proofs; the receipt and the tx are the proven leaves.
+		proofBytes, err := base64.StdEncoding.DecodeString(proof.ReceiptProof)
 		if err != nil {
-			return errors.New("invalid receipt_hex")
+			return errors.New("receipt_proof is not base64")
 		}
-		proofBytes, err := hex.DecodeString(proof.ReceiptProofHex)
-		if err != nil {
-			return errors.New("invalid receipt_proof_hex")
-		}
-		proven, err := mpt.VerifyProof(
+		receiptBytes, err := mpt.VerifyProof(
 			header.ReceiptsRoot,
 			mpt.RLPEncodeKey(proof.TxIndex),
 			splitProofNodes(proofBytes),
 		)
 		if err != nil {
 			return errors.New("receipt proof verification failed")
-		}
-		if !bytesEqual(proven, receiptBytes) {
-			return errors.New("receipt does not match proof")
 		}
 		// Parse status: receipt RLP first field after type-byte strip is status.
 		data := receiptBytes
@@ -1694,20 +1677,13 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 		// transactions trie at the SAME TxIndex. The raw tx carries the
 		// nonce + sender; verifying it lets us reject forged proofs where
 		// proof.TxNonce is decoupled from the proven L1 slot.
-		txBytes, err := hex.DecodeString(proof.TxAtIndexHex)
-		if err != nil || len(txBytes) == 0 {
-			return errors.New("Type A requires tx_at_index_hex bound to the proven receipt")
-		}
-		txProofBytes, err := hex.DecodeString(proof.TxProofHex)
+		txProofBytes, err := base64.StdEncoding.DecodeString(proof.TxProof)
 		if err != nil || len(txProofBytes) == 0 {
-			return errors.New("Type A requires tx_proof_hex for nonce binding")
+			return errors.New("Type A requires tx_proof (base64) for nonce binding")
 		}
-		provenTx, err := mpt.VerifyProof(header.TransactionsRoot, mpt.RLPEncodeKey(proof.TxIndex), splitProofNodes(txProofBytes))
+		txBytes, err := mpt.VerifyProof(header.TransactionsRoot, mpt.RLPEncodeKey(proof.TxIndex), splitProofNodes(txProofBytes))
 		if err != nil {
 			return errors.New("tx proof verification failed")
-		}
-		if !bytesEqual(provenTx, txBytes) {
-			return errors.New("tx does not match proof")
 		}
 		parsed, err := parseTransaction(txBytes)
 		if err != nil {
@@ -1828,14 +1804,13 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 }
 
 // ConfirmSpendSchemaJSON — W4 Cluster E CRIT #5 (D-E-1) canonical wire
-// schema for the ConfirmSpendRequest payload (10 top-level fields).
-const ConfirmSpendSchemaJSON = `{"version":1,"type":"ConfirmSpendRequest","fields":[` +
+// schema for the ConfirmSpendRequest payload (8 top-level fields; version 2
+// since EVM-T1 dropped tx_hex/receipt_hex and moved the proofs to base64).
+const ConfirmSpendSchemaJSON = `{"version":2,"type":"ConfirmSpendRequest","fields":[` +
 	`{"name":"block_height","type":"uint64"},` +
 	`{"name":"tx_index","type":"uint64"},` +
-	`{"name":"tx_hex","type":"hex"},` +
-	`{"name":"tx_proof_hex","type":"hex"},` +
-	`{"name":"receipt_hex","type":"hex"},` +
-	`{"name":"receipt_proof_hex","type":"hex"},` +
+	`{"name":"tx_proof","type":"base64"},` +
+	`{"name":"receipt_proof","type":"base64"},` +
 	`{"name":"intent_nonce","type":"uint64"},` +
 	`{"name":"intent_to","type":"string"},` +
 	`{"name":"intent_amount","type":"string"},` +
