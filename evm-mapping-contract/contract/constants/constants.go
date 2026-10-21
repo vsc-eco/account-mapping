@@ -43,6 +43,7 @@ const (
 	PausedKey               = "paused"               // "1" when paused
 	GasReserveKey           = "gr"                   // gas reserve amount (wei — full L1 native precision; big.Int-encoded decimal string)
 	VaultKeyCacheKey        = "vaultkey"             // A18: "<TSS pubkey hex>|<0x address>", the vault derived from the key
+	VaultCheckedKey         = "vaultok"              // E23: pubkey hex of the primary key whose check signature verified
 	ChainIdKey              = "chainid"              // EVM chain ID
 	VerifierContractIdKey   = "zkverifier"           // ZK header verifier contract ID
 	// MED-33 (M23-F16): block height of the most recent replaceWithdrawal.

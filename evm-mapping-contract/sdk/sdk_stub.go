@@ -173,7 +173,18 @@ func TestCreatedKeys() []string { return append([]string(nil), testCreatedKeys..
 func tssRenewKey(keyId *string, epochs *string) *string { r := ""; return &r }
 
 //go:wasmimport sdk tss.sign_key
-func tssSignKey(keyId *string, msgId *string) *string { return nil }
+func tssSignKey(keyId *string, msgId *string) *string {
+	testSignRequests = append(testSignRequests, *keyId+","+*msgId)
+	return nil
+}
+
+// testSignRequests records every tss.sign_key call as "id,msg hex" (test-only;
+// see TestSignRequests).
+var testSignRequests []string
+
+// TestSignRequests returns the signatures requested since the last
+// ResetTestState. Test-only.
+func TestSignRequests() []string { return append([]string(nil), testSignRequests...) }
 
 // stubTssKey is what tss.get_key returns ("status,pubkey,algo"); nil emulates
 // no key. Test-only.
@@ -258,6 +269,7 @@ func revert(msg, symbol *string) {
 func ResetTestState() {
 	testLogs = nil
 	testCreatedKeys = nil
+	testSignRequests = nil
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}

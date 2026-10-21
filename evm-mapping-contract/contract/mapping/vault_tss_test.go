@@ -16,6 +16,10 @@ const (
 	tssAddrTwo = "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"
 )
 
+// verifyVault marks pubHex's check signature verified (E23), as attestVault
+// does.
+func verifyVault(pubHex string) { sdk.StateSetObject(constants.VaultCheckedKey, pubHex) }
+
 func vaultHex(t *testing.T) (string, bool) {
 	t.Helper()
 	addr, ok := TssVaultAddress()
@@ -43,6 +47,9 @@ func TestA18_VaultIsTheTssKeysAddress(t *testing.T) {
 	} {
 		sdk.ResetStubState()
 		sdk.StubSetTssKey(tc.key)
+		if parts := strings.Split(tc.key, ","); len(parts) > 1 { // E23: verified, so only A18's rules decide
+			verifyVault(strings.ToLower(strings.TrimPrefix(parts[1], "0x")))
+		}
 		got, ok := vaultHex(t)
 		if tc.want == "" {
 			if ok {
@@ -63,6 +70,7 @@ func TestA18_VaultCacheIsPerKey(t *testing.T) {
 	sdk.ResetStubState()
 	defer sdk.ResetStubState()
 	sdk.StubSetTssKey("active," + tssPubG + ",ecdsa")
+	verifyVault(tssPubG)
 	if got, _ := vaultHex(t); !strings.EqualFold(got, tssAddrG) {
 		t.Fatalf("vault %s, want %s", got, tssAddrG)
 	}
@@ -74,8 +82,13 @@ func TestA18_VaultCacheIsPerKey(t *testing.T) {
 	if got, _ := vaultHex(t); got != "0x00000000000000000000000000000000000000c1" {
 		t.Fatalf("vault %s, want the cached address", got)
 	}
-	// A different key ignores the entry and replaces it.
+	// A different key has no vault until it too is verified (E23), then
+	// ignores the entry and replaces it.
 	sdk.StubSetTssKey("active," + tssPubTwo + ",ecdsa")
+	if got, ok := vaultHex(t); ok {
+		t.Fatalf("a new key before its check signature: vault %s, want none", got)
+	}
+	verifyVault(tssPubTwo)
 	if got, _ := vaultHex(t); !strings.EqualFold(got, tssAddrTwo) {
 		t.Fatalf("after rotation vault %s, want %s", got, tssAddrTwo)
 	}
