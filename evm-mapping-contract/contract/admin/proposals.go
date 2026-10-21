@@ -37,7 +37,7 @@ import (
 // (monotonic counter, NOT a hash) per v19 §AU.
 type PendingProposal struct {
 	ProposalId   uint64   `json:"proposal_id"`   // v19 §AU — monotonic counter; assigned at propose() time
-	Action       string   `json:"action"`        // handler name, e.g. "setVault"
+	Action       string   `json:"action"`        // handler name, e.g. "setVerifierContract"
 	PayloadHash  [32]byte `json:"payload_hash"`  // keccak256 of the action's input payload bytes
 	Proposer     string   `json:"proposer"`      // hive account that proposed
 	QueueHeight  uint64   `json:"queue_height"`  // block height when proposed
@@ -70,8 +70,10 @@ const (
 // Action class enumeration (string actions are matched against this set).
 //
 // Per W4 §D-C-8 17-handler migration table:
-//   Fund-affecting (Long, 400K):     setVault, setVerifierContract, createKey, renewKey
-//   Operator-tactical (28.8K, 24h):  registerPublicKey, replaceWithdrawal, clearNonce
+//   Fund-affecting (Long, 400K):     setVerifierContract, createKey, renewKey
+//   Operator-tactical (28.8K, 24h):  replaceWithdrawal, clearNonce
+//   (setVault and registerPublicKey were removed by A18: the vault is the TSS
+//   primary key's address.)
 //   Operational (7.2K, 6h):          registerToken, registerRouter,
 //                                     registerRelayer, deregisterRelayer,
 //                                     clearTestnetState (Cluster E coord)
@@ -83,9 +85,9 @@ const (
 // setChainId / adminMint are DROPPED (CRIT #6 / CRIT #9 v10).
 func TimelockFor(action string) (uint64, error) {
 	switch action {
-	case "setVault", "setVerifierContract", "createKey", "renewKey":
+	case "setVerifierContract", "createKey", "renewKey":
 		return TimelockLong, nil
-	case "registerPublicKey", "replaceWithdrawal", "clearNonce":
+	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
 	case "registerToken", "registerRouter",
 		"registerRelayer", "deregisterRelayer", "clearTestnetState":
