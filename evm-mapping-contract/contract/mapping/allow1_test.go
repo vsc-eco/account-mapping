@@ -65,9 +65,15 @@ func TestALLOW1_ValidSpendersAreAccepted(t *testing.T) {
 
 func TestALLOW1_EveryAllowanceWriterChecksTheSpender(t *testing.T) {
 	for name, op := range map[string]func() error{
-		"approve":           func() error { return HandleApprove(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"}) },
-		"increaseAllowance": func() error { return HandleIncreaseAllowance(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"}) },
-		"decreaseAllowance": func() error { return HandleDecreaseAllowance(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"}) },
+		"approve": func() error {
+			return HandleApprove(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"})
+		},
+		"increaseAllowance": func() error {
+			return HandleIncreaseAllowance(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"})
+		},
+		"decreaseAllowance": func() error {
+			return HandleDecreaseAllowance(&AllowanceParams{Spender: "bob-hive:mallory", Amount: "1", Asset: "eth"})
+		},
 	} {
 		sdk.ResetTestState()
 		sdk.SetTestCaller("hive:alice")
@@ -83,8 +89,10 @@ func TestALLOW1_EveryAllowanceWriterChecksTheSpender(t *testing.T) {
 func TestA5_TransferRefusesMalformedRecipients(t *testing.T) {
 	for _, to := range []string{"", "bob", "not an address", "hive:Alice", "hive:ab", "did:pkh:eip155:1:0xzz", "did:pkh:eip155:11155111:0x00000000000000000000000000000000000000e2"} {
 		for name, op := range map[string]func() error{
-			"transfer":     func() error { return HandleTransfer(&TransferParams{To: to, Amount: "100", Asset: "eth"}) },
-			"transferFrom": func() error { return HandleTransferFrom(&TransferParams{From: "hive:alice", To: to, Amount: "100", Asset: "eth"}) },
+			"transfer": func() error { return HandleTransfer(&TransferParams{To: to, Amount: "100", Asset: "eth"}) },
+			"transferFrom": func() error {
+				return HandleTransferFrom(&TransferParams{From: "hive:alice", To: to, Amount: "100", Asset: "eth"})
+			},
 		} {
 			sdk.ResetTestState()
 			sdk.SetTestCaller("hive:alice")
