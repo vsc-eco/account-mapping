@@ -70,14 +70,14 @@ const (
 // Action class enumeration (string actions are matched against this set).
 //
 // Per W4 §D-C-8 17-handler migration table:
-//   Fund-affecting (Long, 400K):     setVerifierContract, createKey, renewKey
+//   Fund-affecting (Long, 400K):     setVerifierContract, createKey
 //   Operator-tactical (28.8K, 24h):  replaceWithdrawal, clearNonce
 //   (setVault and registerPublicKey were removed by A18: the vault is the TSS
 //   primary key's address.)
 //   Operational (7.2K, 6h):          registerToken, registerRouter,
 //                                     registerRelayer, deregisterRelayer,
 //                                     clearTestnetState (Cluster E coord)
-//   Emergency (0):                   pause, unpause
+//   Emergency (0):                   pause, unpause, renewKey (D7)
 //
 // review6 H2: addBlocks / seedBlocks / setOracleAccount / replaceBlock are
 //   all REMOVED — headers come from the ZK header-verifier contract only.
@@ -85,14 +85,19 @@ const (
 // setChainId / adminMint are DROPPED (CRIT #6 / CRIT #9 v10).
 func TimelockFor(action string) (uint64, error) {
 	switch action {
-	case "setVerifierContract", "createKey", "renewKey":
+	case "setVerifierContract", "createKey":
 		return TimelockLong, nil
 	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
 	case "registerToken", "registerRouter",
 		"registerRelayer", "deregisterRelayer", "clearTestnetState":
 		return TimelockOperational, nil
-	case "pause", "unpause":
+	// D7: renewKey only extends the vault key's life and moves nothing. The
+	// key expires after 365 epochs (~91 days), retires 403,200 blocks after
+	// that and can then never sign again, so a 400K-block timelock left an
+	// owner who started the renewal after expiry ~3,200 blocks to spare. The
+	// BTC mapping contract's renewKey is owner-only and immediate too.
+	case "pause", "unpause", "renewKey":
 		return TimelockImmediate, nil
 	default:
 		return 0, errors.New("unknown admin action: " + action)

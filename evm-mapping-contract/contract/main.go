@@ -497,7 +497,8 @@ func dispatchAdmin(action string, payload []byte) {
 	case "renewKey":
 		// CRIT #17 flag 1 / W4 Cluster F D-F-1: TssRenewKey extends
 		// ExpiryEpoch (NOT TssCreateKey, which would be a no-op).
-		assertNotPaused()
+		// D7: allowed while paused: a pause that outlasts the key's expiry
+		// window must not retire the key that holds every deposit.
 		sdk.TssRenewKey("primary", 365)
 
 	// Operator-tactical (28.8K blocks, 24h)

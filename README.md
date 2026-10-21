@@ -42,10 +42,12 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 - `initContract` — one-shot, the deployer with active authority: `chain_id` (required), `is_testnet`, and optionally `verifier_contract` and `create_key` to wire the header verifier and request the `primary` TSS key at deploy. Set later, both wait out the 400K-block timelock below, so a bridge deployed without them takes ~14 days to accept its first deposit.
 
 **Admin / owner** (`propose`, then `execute` once the timelock has passed; `cancel`, `expireProposal`):
-- ~14 days (400K blocks): `setVerifierContract`, `createKey`, `renewKey`
+- ~14 days (400K blocks): `setVerifierContract`, `createKey`
 - 24 hours: `replaceWithdrawal`, `clearNonce`
 - 6 hours: `registerToken`, `registerRouter`, `registerRelayer`, `deregisterRelayer`, `clearTestnetState`
-- immediate: `pause`, `unpause`
+- immediate: `pause`, `unpause`, `renewKey` (also while paused)
+
+The `primary` key expires 365 epochs (~91 days) after keygen and retires ~14 days after that; a retired key can never sign, so every deposit in the vault would stay there. Run `renewKey` before expiry (the bot warns from 7 days out, and when the key has expired).
 
 ## Repo Layout
 
