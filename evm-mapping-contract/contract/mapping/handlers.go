@@ -14,6 +14,7 @@ import (
 	"evm-mapping-contract/contract/rlp"
 	"evm-mapping-contract/sdk"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -185,6 +186,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return "", err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -317,6 +321,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return "", err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -635,6 +642,9 @@ func HandleTransfer(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -665,6 +675,9 @@ func HandleTransferFrom(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -700,6 +713,9 @@ func HandleApprove(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -961,6 +977,19 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
 }
 
+// checkAuth refuses a fund-moving call that the sender did not sign with active
+// authority (A2). A posting signature also makes its signer the Caller, so
+// without this a posting key (often held by front ends) could transfer, approve
+// or unmap the account's funds. An L2 tx lists every DID that signed it in
+// RequiredAuths, so a did:pkh signer passes. Mirrors checkAuth in the BTC
+// mapping contract (mapping/utils.go).
+func checkAuth(env sdk.Env) error {
+	if !slices.Contains(env.Sender.RequiredAuths, env.Sender.Address) {
+		return ce.NewContractError(ce.ErrNoPermission, "active auth required to send funds")
+	}
+	return nil
+}
+
 func requireTssKey() error {
 	keyInfo := sdk.TssGetKey("primary")
 	if keyInfo == "" || keyInfo == "fail" {
@@ -1023,6 +1052,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -1227,6 +1259,9 @@ func HandleIncreaseAllowance(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -1249,6 +1284,9 @@ func HandleDecreaseAllowance(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)

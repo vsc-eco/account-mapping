@@ -11,6 +11,7 @@ import (
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/mapping"
 	"evm-mapping-contract/sdk"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -63,10 +64,25 @@ func unmarshalParams(input *string, dest interface{}) {
 }
 
 func checkOwner() {
-	caller := sdk.GetEnv().Caller.String()
+	env := sdk.GetEnv()
 	owner := sdk.GetEnvKey("contract.owner")
-	if owner == nil || caller != *owner {
+	if owner == nil || env.Caller.String() != *owner {
 		ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "owner required"))
+	}
+	requireOwnerActive(env)
+}
+
+// requireOwnerActive aborts unless the owner signed this transaction with active
+// authority (A2). A posting-only signature also makes the owner the Caller, so
+// comparing Caller to the owner alone let the owner's posting key, rather than
+// the multisig on its active authority, propose, execute and cancel admin
+// actions. The caller of this helper has already checked that Caller is the
+// owner. Mirrors requireOwnerActive in the BTC mapping contract.
+func requireOwnerActive(env sdk.Env) {
+	if !slices.Contains(env.Sender.RequiredAuths, env.Caller) {
+		ce.CustomAbort(
+			ce.NewContractError(ce.ErrNoPermission, "owner action requires active authority (posting authority cannot authorize it)"),
+		)
 	}
 }
 
@@ -97,11 +113,12 @@ func initContract(input *string) *string {
 	if existing := sdk.StateGetObject(constants.InitMarkerKey); existing != nil && *existing == "1" {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInitialization, "contract already initialized"))
 	}
-	caller := sdk.GetEnv().Caller.String()
+	env := sdk.GetEnv()
 	owner := sdk.GetEnvKey("contract.owner")
-	if owner == nil || caller != *owner {
+	if owner == nil || env.Caller.String() != *owner {
 		ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "initContract requires deployer"))
 	}
+	requireOwnerActive(env)
 	var params initContractParams
 	if input != nil && *input != "" {
 		if err := json.Unmarshal([]byte(*input), &params); err != nil {

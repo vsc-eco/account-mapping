@@ -210,6 +210,13 @@ func SetTestEnv(caller, sender string) {
 // SetTestCaller is shorthand for SetTestEnv(addr, addr).
 func SetTestCaller(addr string) { SetTestEnv(addr, addr) }
 
+// SetTestPostingCaller makes addr the caller and sender of a transaction it
+// signed with posting authority only (no active authority).
+func SetTestPostingCaller(addr string) {
+	testEnvJSON = `{"contract.id":"contract:test","msg.caller":"` + addr +
+		`","msg.sender":"` + addr + `","msg.required_auths":[],"msg.required_posting_auths":["` + addr + `"]}`
+}
+
 // SetTestEnvKey sets a getEnvKey value (e.g. "contract.owner").
 func SetTestEnvKey(key, value string) { testEnvKeys[key] = value }
 
