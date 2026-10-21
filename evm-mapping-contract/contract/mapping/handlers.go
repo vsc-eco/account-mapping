@@ -789,6 +789,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 	did := crypto.AddressToDID(sender)
 	dest := did
 	var swapTo, assetOut, destChain string
+	var minAmountOut *string
 
 	// MED-66 (T2-7/CF-EVM-4) site 2: bound the instruction list. Routing needs
 	// only a handful of directives; an over-cap list is an attacker paying dust
@@ -815,6 +816,13 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		}
 		if len(instr) > 18 && instr[:18] == "destination_chain=" {
 			destChain = instr[18:]
+		}
+		// A8: forward the depositor's min_amount_out. The calldata is public
+		// on L1 minutes before the map lands, so without a floor anyone could
+		// move the pool first and the swap ran at whatever price was left.
+		if len(instr) > 15 && instr[:15] == "min_amount_out=" {
+			v := instr[15:]
+			minAmountOut = &v
 		}
 	}
 
@@ -845,6 +853,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			AssetOut:         assetOut,
 			Recipient:        swapTo,
 			DestinationChain: destChain,
+			MinAmountOut:     minAmountOut,
 		})
 
 		// A9 (RV re-verify): call the router with try/catch so a router that
