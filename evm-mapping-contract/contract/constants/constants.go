@@ -159,11 +159,15 @@ const GasReserveDepositTaxBps = int64(100) // 1% of ETH deposits go to gas reser
 // 0.05 ETH = 50_000_000_000_000_000 wei.
 const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum reserve
 
-// W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window.
-// EXPIRY_WINDOW = 5000 Hive blocks ≈ 4 hours (Hive 3s blocks). Any L2 caller
-// can submit `expireWithdrawal` once currentBlock >= pending.BlockHeight +
-// WithdrawalExpiryWindow with an L1-proof-of-drop per D-E-4.
-const WithdrawalExpiryWindow uint64 = 5000
+// W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window. Any
+// L2 caller can submit `expireWithdrawal` once the verified L1 chain
+// (blocklist.GetLastHeight) is WithdrawalExpiryWindow blocks past
+// pending.BlockHeight, with an L1-proof-of-drop per D-E-4.
+//
+// E22: pending.BlockHeight is an L1 height. The window was 5000 "Hive blocks"
+// compared against the Hive height, which is far above any L1 height, so it
+// was always open. It is now 1200 L1 blocks (about 4 hours at 12 s).
+const WithdrawalExpiryWindow uint64 = 1200
 
 // D3: L1 blocks (of the verified header chain) after the withdrawal was queued
 // before anyone may roll it back with rollWithdrawal: 1200 blocks, about 4

@@ -1649,7 +1649,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 	caller := env.Caller.String()
 	isOriginalWithdrawer := crypto.SameIdentity(caller, ps.From)
 	expiryHeight := ps.BlockHeight + constants.WithdrawalExpiryWindow
-	hasExpired := env.BlockHeight >= expiryHeight
+	hasExpired := blocklist.GetLastHeight() >= expiryHeight
 
 	// Pre-window: only the original withdrawer may early-cancel. Post-window:
 	// anyone may expire (the window is the gate for WHO).

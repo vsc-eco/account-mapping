@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"evm-mapping-contract/contract/constants"
 	"evm-mapping-contract/sdk"
 )
 
@@ -23,8 +24,12 @@ import (
 // branches — both pre-window AND post-window. This test sets up a
 // PendingSpend, calls HandleExpireWithdrawal with proof.Type="" (the
 // empty-proof exploit), and asserts the rejection. Two scenarios:
-// pre-window (env.BlockHeight < expiryHeight) and post-window
-// (env.BlockHeight >= expiryHeight) both reject identically.
+// pre-window and post-window both reject.
+//
+// E22: the window is now counted in L1 blocks (the verified header height
+// against ps.BlockHeight); the Hive height no longer opens it. The post-window
+// cases plant a verified L1 height past the window, so they reach the
+// mandatory-proof guard itself and must be refused by it.
 //
 // This is the on-host equivalent of the buggy 838f98f tip's behavior —
 // the pre-fix code would have accepted the empty proof in the post-window
@@ -34,6 +39,7 @@ func TestReview6_C1_HandleExpireWithdrawal_EmptyProofRejected(t *testing.T) {
 		name          string
 		envBlock      uint64 // hive height
 		psBlockHeight uint64 // eth height stored on the PendingSpend
+		lastL1        uint64 // verified L1 header height (0: no verifier)
 		callerIsOwner bool
 	}{
 		{
@@ -43,15 +49,17 @@ func TestReview6_C1_HandleExpireWithdrawal_EmptyProofRejected(t *testing.T) {
 			callerIsOwner: true, // pre-window requires original withdrawer
 		},
 		{
-			name:          "post-window: env.BlockHeight >= expiryHeight (audit's C1 path)",
-			envBlock:      1_000_000_000, // hive height huge — simulates mainnet domain mismatch
-			psBlockHeight: 100,           // eth height; expiry = 100+5000 = 5100; 1B > 5100
-			callerIsOwner: false,         // post-window: anyone may call
+			name:          "post-window: verified L1 past ps.BlockHeight+window (audit's C1 path)",
+			envBlock:      1_000_000_000, // hive height huge, as on mainnet
+			psBlockHeight: 100,
+			lastL1:        100 + constants.WithdrawalExpiryWindow,
+			callerIsOwner: false, // post-window: anyone may call
 		},
 		{
 			name:          "post-window: original withdrawer too",
 			envBlock:      1_000_000_000,
 			psBlockHeight: 100,
+			lastL1:        100 + constants.WithdrawalExpiryWindow,
 			callerIsOwner: true,
 		},
 	}
@@ -87,6 +95,16 @@ func TestReview6_C1_HandleExpireWithdrawal_EmptyProofRejected(t *testing.T) {
 				"intents": []
 			}`
 			sdk.StubSetEnvJSON(envJSON)
+			if tt.lastL1 != 0 {
+				sdk.StateSetObject(constants.VerifierContractIdKey, "vsc1verifierstub")
+				last := uintStr(tt.lastL1)
+				sdk.StubSetContractReadResponder(func(contractId, key string) *string {
+					if contractId == "vsc1verifierstub" && key == constants.LastHeightKey {
+						return &last
+					}
+					return nil
+				})
+			}
 
 			// Seed a PendingSpend at nonce=0 (confirmedNonce head).
 			ps := PendingSpend{
@@ -109,6 +127,9 @@ func TestReview6_C1_HandleExpireWithdrawal_EmptyProofRejected(t *testing.T) {
 
 			if err == nil {
 				t.Fatalf("C1 FIXED check FAILED: HandleExpireWithdrawal with empty proof returned nil — empty proof was ACCEPTED. This is the audit-reported drain.")
+			}
+			if tt.lastL1 != 0 && !strings.Contains(err.Error(), "L1-proof-of-drop is mandatory") {
+				t.Fatalf("post-window: rejected by %v, want the mandatory-proof guard", err)
 			}
 			if !strings.Contains(err.Error(), "L1-proof-of-drop is mandatory") {
 				// Other valid rejection reasons (pre-window non-original-withdrawer)

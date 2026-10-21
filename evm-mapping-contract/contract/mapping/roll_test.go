@@ -262,3 +262,26 @@ func TestD3_OnlyAZeroValueSelfTransferIsTheRoll(t *testing.T) {
 		t.Fatalf("a 1 ETH withdrawal to the vault was taken for the roll: balance %s n=%d", GetBalance("hive:alice", "eth"), GetConfirmedNonce())
 	}
 }
+
+// E22: the expireWithdrawal window is counted in L1 blocks. It compared the
+// L1 queue height with the Hive height, which on every network is far above
+// it, so a stranger could always expire a fresh withdrawal.
+func TestE22_ExpireWindowIsCountedInL1Blocks(t *testing.T) {
+	w := newRollWorld(t)
+	defer sdk.ResetStubState()
+	w.l2 = 106_000_000 // a Hive height
+	w.caller("hive:carol")
+	w.last = 100 + constants.WithdrawalExpiryWindow - 1
+	w.header(w.last, [32]byte{}, [32]byte{})
+	err := HandleExpireWithdrawal(0, L1ProofOfDrop{Type: L1ProofTypeRevertedReceipt}, 1)
+	if err == nil || !strings.Contains(err.Error(), "window not elapsed") {
+		t.Fatalf("a stranger inside the L1 window: %v, want the window refusal", err)
+	}
+	// Past the window the gate opens (the proof is still required).
+	w.last++
+	w.header(w.last, [32]byte{}, [32]byte{})
+	err = HandleExpireWithdrawal(0, L1ProofOfDrop{Type: L1ProofTypeRevertedReceipt}, 1)
+	if err == nil || strings.Contains(err.Error(), "window not elapsed") {
+		t.Fatalf("a stranger past the L1 window: %v, want the gate open and the proof checked", err)
+	}
+}
