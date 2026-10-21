@@ -26,7 +26,7 @@ import (
 // TestGasReserve_DroppedWithdrawalRestoresReserve — an ERC-20 PendingSpend
 // proven dropped restores both the reserve counter and the Active("eth")
 // custody booking, and refunds the user's tokens.
-func TestGasReserve_DroppedWithdrawalRestoresReserve(t *testing.T) {
+func TestGasReserve_MinedRevertedWithdrawalKeepsReserveSpent(t *testing.T) {
 	sdk.ResetTestStateStore()
 
 	startReserve := big.NewInt(1_000_000)
@@ -53,11 +53,16 @@ func TestGasReserve_DroppedWithdrawalRestoresReserve(t *testing.T) {
 
 	refundDroppedWithdrawal(ps)
 
-	if got := getGasReserve(); got.Cmp(startReserve) != 0 {
-		t.Fatalf("dropped withdrawal must restore the reserve: want %s, got %s", startReserve, got)
+	// E9 (RV re-verify): the only accepted drop proof is Type-A (mined,
+	// reverted) — the L1 gas was really paid, so the reserve is NOT restored
+	// (the miner kept it) and Active(eth) stays reduced. Only the token VALUE
+	// is refunded. Pre-fix this restored the reserve and over-stated custody.
+	spentReserve := new(big.Int).Sub(startReserve, gasCost)
+	if got := getGasReserve(); got.Cmp(spentReserve) != 0 {
+		t.Fatalf("mined-reverted withdrawal must NOT restore the reserve: want %s, got %s", spentReserve, got)
 	}
-	if got := GetSupply("eth").Active; got.Cmp(startReserve) != 0 {
-		t.Fatalf("dropped withdrawal must restore Active(eth): want %s, got %s", startReserve, got)
+	if got := GetSupply("eth").Active; got.Cmp(spentReserve) != 0 {
+		t.Fatalf("Active(eth) must stay reduced by the spent gas: want %s, got %s", spentReserve, got)
 	}
 	if got := GetBalance("hive:alice", "usdc"); got.Cmp(tokenAmount) != 0 {
 		t.Fatalf("dropped withdrawal must refund the token amount: want %s, got %s", tokenAmount, got)
@@ -71,7 +76,7 @@ func TestGasReserve_DroppedWithdrawalRestoresReserve(t *testing.T) {
 // TestGasReserve_DroppedETHWithdrawalRefundsFee — an ETH PendingSpend proven
 // dropped refunds the L1 value AND the prepaid fee (the user paid
 // Amount+GasCost at unmap and nothing left custody).
-func TestGasReserve_DroppedETHWithdrawalRefundsFee(t *testing.T) {
+func TestGasReserve_MinedRevertedETHWithdrawalRefundsValueOnly(t *testing.T) {
 	sdk.ResetTestStateStore()
 
 	value := big.NewInt(1_000_000_000)
@@ -91,12 +96,15 @@ func TestGasReserve_DroppedETHWithdrawalRefundsFee(t *testing.T) {
 
 	refundDroppedWithdrawal(ps)
 
-	if got := GetBalance("hive:alice", "eth"); got.Cmp(total) != 0 {
-		t.Fatalf("dropped ETH withdrawal must refund value+fee: want %s, got %s", total, got)
+	// E9 (RV re-verify): Type-A (mined, reverted) is the only accepted drop
+	// proof, so the gas was really spent — refund the VALUE only, not value+fee.
+	_ = total
+	if got := GetBalance("hive:alice", "eth"); got.Cmp(value) != 0 {
+		t.Fatalf("mined-reverted ETH withdrawal must refund value only: want %s, got %s", value, got)
 	}
 	s := GetSupply("eth")
-	if s.Active.Cmp(total) != 0 || s.User.Cmp(total) != 0 {
-		t.Fatalf("supply must be restored by value+fee: Active=%s User=%s, want both %s", s.Active, s.User, total)
+	if s.Active.Cmp(value) != 0 || s.User.Cmp(value) != 0 {
+		t.Fatalf("supply must be restored by value only: Active=%s User=%s, want both %s", s.Active, s.User, value)
 	}
 	if s.Fee.Sign() != 0 {
 		t.Fatalf("Fee must stay 0 (no Magi revenue fees): got %s", s.Fee)

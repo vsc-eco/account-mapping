@@ -71,6 +71,13 @@ const (
 	// per-relayer entry stored under "rl-{hiveAccountName}" → "1".
 	RelayerRegistryPrefix = "rl" + DirPathDelimiter // rl-{hive_account} → "1"
 
+	// E1 (RV re-verify): NativeAsset is the one asset symbol that is always
+	// valid without a registry entry. AllowedSymbolPrefix+{symbol} is written by
+	// RegisterToken as an O(1) allowlist marker so balance/allowance handlers can
+	// reject free-form asset strings that would inject arbitrary ledger keys.
+	NativeAsset         = "eth"
+	AllowedSymbolPrefix = "as" + DirPathDelimiter // as-{symbol} → "1"
+
 	// W4 Cluster C (v20 §BD): oracle account allowed to call addBlocks
 	// without going through the propose/execute timelock. addBlocks must
 	// remain a high-frequency operational path for the oracle relay; the

@@ -121,8 +121,15 @@ func tssRenewKey(keyId *string, epochs *string) *string { return nil }
 //go:wasmimport sdk tss.sign_key
 func tssSignKey(keyId *string, msgId *string) *string { return nil }
 
+// stubTssKey is what tss.get_key returns ("status,pubkey,algo"); nil emulates
+// no key. Test-only.
+var stubTssKey *string
+
+// StubSetTssKey sets the tss.get_key response. Test-only.
+func StubSetTssKey(info string) { stubTssKey = &info }
+
 //go:wasmimport sdk tss.get_key
-func tssGetKey(keyId *string) *string { return nil }
+func tssGetKey(keyId *string) *string { return stubTssKey }
 
 // var envMap = []string{
 // 	"contract.id",
@@ -210,6 +217,13 @@ func SetTestEnv(caller, sender string) {
 // SetTestCaller is shorthand for SetTestEnv(addr, addr).
 func SetTestCaller(addr string) { SetTestEnv(addr, addr) }
 
+// SetTestPostingCaller makes addr the caller and sender of a transaction it
+// signed with posting authority only (no active authority).
+func SetTestPostingCaller(addr string) {
+	testEnvJSON = `{"contract.id":"contract:test","msg.caller":"` + addr +
+		`","msg.sender":"` + addr + `","msg.required_auths":[],"msg.required_posting_auths":["` + addr + `"]}`
+}
+
 // SetTestEnvKey sets a getEnvKey value (e.g. "contract.owner").
 func SetTestEnvKey(key, value string) { testEnvKeys[key] = value }
 
@@ -233,6 +247,7 @@ func ResetStubState() {
 	ResetTestState()
 	stubContractCallResponder = nil
 	stubContractReadResponder = nil
+	stubTssKey = nil
 }
 
 // StubSetEnvJSON installs the JSON blob `getEnv` should return. Test-only.

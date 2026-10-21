@@ -120,7 +120,7 @@ tinyjson:
 	# Ensure tinyjson exists \
 	if ! command -v $(TINYJSON) >/dev/null 2>&1; then \
 		echo "tinyjson not found, installing..."; \
-		go install github.com/CosmWasm/tinyjson@latest || \
+		go install github.com/CosmWasm/tinyjson/tinyjson@v0.9.0 || \
 			{ echo "Failed to install tinyjson"; exit 1; }; \
 	fi; \
 	\

@@ -46,7 +46,14 @@ type TokenInfo struct {
 
 // ConfirmSpendRequest carries both tx and receipt proofs for withdrawal
 // confirmation. W4 Cluster E CRIT #5 + HIGH #13 (D-E-1 + D-E-2 LOCKED): the
-// payload is 10 TOP-LEVEL fields — 6 proof legs + 4 intent reference fields.
+// payload is 8 TOP-LEVEL fields: 4 proof legs + 4 intent reference fields.
+//
+// EVM-T1: the proofs travel as base64 and the tx and receipt are not sent on
+// their own. They are the leaves the two proofs prove, so the contract takes
+// them from mpt.VerifyProof. With hex proofs and both leaves sent twice, a
+// confirmSpend for a withdrawal mined late in a large L1 block went over the
+// node's 8,192-byte contract-payload cap (MAX_CONTRACT_PAYLOAD_SIZE), failed on
+// every node, and froze every withdrawal behind it (only one may be pending).
 // Adding the intent fields lets the contract verify the TSS-signed L1 tx
 // matches the on-chain PendingSpend (closes HIGH #13: TSS quorum can sign
 // arbitrary L1 tx). Validation order in HandleConfirmSpend per D-E-2:
@@ -57,13 +64,11 @@ type TokenInfo struct {
 // Wire-format authority: `confirmSpendSchema()` wasmexport in main.go
 // returns this struct's canonical schema JSON for bot startup introspection.
 type ConfirmSpendRequest struct {
-	// Proof legs (6 existing)
-	BlockHeight     uint64 `json:"block_height"`
-	TxIndex         uint64 `json:"tx_index"`
-	TxHex           string `json:"tx_hex"`
-	TxProofHex      string `json:"tx_proof_hex"`
-	ReceiptHex      string `json:"receipt_hex"`
-	ReceiptProofHex string `json:"receipt_proof_hex"`
+	// Proof legs
+	BlockHeight  uint64 `json:"block_height"`
+	TxIndex      uint64 `json:"tx_index"`
+	TxProof      string `json:"tx_proof"`      // base64: concatenated tx-trie MPT nodes, leaf = the raw tx
+	ReceiptProof string `json:"receipt_proof"` // base64: concatenated receipt-trie MPT nodes, leaf = the receipt
 	// Intent reference (4 NEW — HIGH #13 D-E-1). Contract MUST verify all 4
 	// match the looked-up PendingSpend BEFORE proof verification.
 	IntentNonce  uint64 `json:"intent_nonce"`  // PendingSpend.Nonce
@@ -99,9 +104,10 @@ type ConfirmSpendRequest struct {
 //	  "block_height":      uint64,            // finalized L1 height of the proof
 //	  "tx_index":          uint64,            // tx index for type A; unused for type B (disabled)
 //	  "tx_nonce":          uint64,            // L1 nonce being proven cleared (== ps.Nonce)
-//	  // Type A only — empty for type B
-//	  "receipt_hex":       "0x...",           // RLP receipt with status=0
-//	  "receipt_proof_hex": "0x...",           // concatenated receipt-trie MPT nodes
+//	  // Type A only, empty for type B. base64, and the receipt and tx are the
+//	  // proven leaves (EVM-T1: the same 8,192-byte cap as ConfirmSpendRequest)
+//	  "receipt_proof":     "...",             // concatenated receipt-trie MPT nodes; leaf = receipt with status=0
+//	  "tx_proof":          "...",             // concatenated tx-trie MPT nodes at the same tx_index; leaf = raw tx
 //	  // Type B fields (present for forward-compat; ignored while disabled)
 //	  "tx_at_index_hex":   "0x...",
 //	  "tx_proof_hex":      "0x...",
@@ -118,12 +124,12 @@ type ConfirmSpendRequest struct {
 // ZK light client (per the ZK architecture note above). The bot MUST NOT
 // supply a header that has not been ingested by HandleAddBlocks.
 type L1ProofOfDrop struct {
-	Type               string `json:"type"`                  // "reverted_receipt" or "block_inclusion_without_tx"
-	BlockHeight        uint64 `json:"block_height"`          // finalized L1 height
-	TxIndex            uint64 `json:"tx_index"`              // index within block
-	TxNonce            uint64 `json:"tx_nonce"`              // L1 nonce being cleared
-	ReceiptHex         string `json:"receipt_hex,omitempty"` // type A
-	ReceiptProofHex    string `json:"receipt_proof_hex,omitempty"`
+	Type               string `json:"type"`                      // "reverted_receipt" or "block_inclusion_without_tx"
+	BlockHeight        uint64 `json:"block_height"`              // finalized L1 height
+	TxIndex            uint64 `json:"tx_index"`                  // index within block
+	TxNonce            uint64 `json:"tx_nonce"`                  // L1 nonce being cleared
+	ReceiptProof       string `json:"receipt_proof,omitempty"`   // type A, base64
+	TxProof            string `json:"tx_proof,omitempty"`        // type A, base64
 	TxAtIndexHex       string `json:"tx_at_index_hex,omitempty"` // type B
 	TxProofHex         string `json:"tx_proof_hex,omitempty"`
 	VaultNonceProofHex string `json:"vault_nonce_proof_hex,omitempty"` // optional safety hint (type B)

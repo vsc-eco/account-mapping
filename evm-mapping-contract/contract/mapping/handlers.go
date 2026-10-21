@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"evm-mapping-contract/contract/rlp"
 	"evm-mapping-contract/sdk"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -184,6 +186,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return "", err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -316,6 +321,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return "", err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -381,6 +389,16 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		if gasCost.Cmp(maxFee) > 0 {
 			return "", ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
 		}
+	}
+
+	// RV-6 (RV re-verify): the ERC-20 gas is paid out of the shared ETH reserve.
+	// The MinGasReserve floor above is NOT enough — at a high base fee the gas
+	// estimate can exceed the whole reserve, and the pre-fix deductGasReserve
+	// clamped to 0 while Active("eth") was still debited the full estimate,
+	// silently spending user-owned ETH and under-collateralizing the vault.
+	// Require the reserve to actually cover this withdrawal's gas before signing.
+	if getGasReserve().Cmp(gasCost) < 0 {
+		return "", ce.NewContractError(ce.ErrBalance, "gas reserve cannot cover this withdrawal's L1 gas at the current base fee")
 	}
 
 	nonce := GetPendingNonce()
@@ -470,23 +488,17 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	}
 
 	// --- Transaction proof: verify the tx matches the pending spend ---
-	txBytes, err := hex.DecodeString(req.TxHex)
+	// EVM-T1: the tx is the proof's leaf, so it is not sent on its own.
+	txProofBytes, err := base64.StdEncoding.DecodeString(req.TxProof)
 	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_hex")
-	}
-	txProofBytes, err := hex.DecodeString(req.TxProofHex)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "tx_proof_hex")
+		return ce.WrapContractError(ce.ErrInput, err, "tx_proof is not base64")
 	}
 
 	txProof := splitProofNodes(txProofBytes)
 	txKey := rlp.EncodeUint64(req.TxIndex)
-	provenTx, err := mpt.VerifyProof(header.TransactionsRoot, txKey, txProof)
+	txBytes, err := mpt.VerifyProof(header.TransactionsRoot, txKey, txProof)
 	if err != nil {
 		return ce.Prepend(err, "tx proof")
-	}
-	if !bytesEqual(provenTx, txBytes) {
-		return ce.NewContractError(ce.ErrTransaction, "tx does not match proof")
 	}
 
 	parsedTx, err := parseTransaction(txBytes)
@@ -572,23 +584,17 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	}
 
 	// --- Receipt proof: determine success or failure ---
-	receiptBytes, err := hex.DecodeString(req.ReceiptHex)
+	// EVM-T1: the receipt is the proof's leaf, so it is not sent on its own.
+	receiptProofBytes, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
 	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_hex")
-	}
-	receiptProofBytes, err := hex.DecodeString(req.ReceiptProofHex)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipt_proof_hex")
+		return ce.WrapContractError(ce.ErrInput, err, "receipt_proof is not base64")
 	}
 
 	receiptProof := splitProofNodes(receiptProofBytes)
 	receiptKey := rlp.EncodeUint64(req.TxIndex)
-	provenReceipt, err := mpt.VerifyProof(header.ReceiptsRoot, receiptKey, receiptProof)
+	receiptBytes, err := mpt.VerifyProof(header.ReceiptsRoot, receiptKey, receiptProof)
 	if err != nil {
 		return ce.Prepend(err, "receipt proof")
-	}
-	if !bytesEqual(provenReceipt, receiptBytes) {
-		return ce.NewContractError(ce.ErrTransaction, "receipt does not match proof")
 	}
 
 	receiptToParse := receiptBytes
@@ -636,6 +642,9 @@ func HandleTransfer(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -647,6 +656,11 @@ func HandleTransfer(params *TransferParams) error {
 	// funds permanently unspendable. Reject it.
 	if params.To == "" {
 		return ce.NewContractError(ce.ErrInput, "invalid recipient")
+	}
+
+	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
+	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
 	}
 
 	if !DecBalance(caller, params.Asset, amount) {
@@ -661,6 +675,9 @@ func HandleTransferFrom(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -671,6 +688,11 @@ func HandleTransferFrom(params *TransferParams) error {
 	// review2 #43: reject empty recipient (funds would be unspendable).
 	if params.To == "" {
 		return ce.NewContractError(ce.ErrInput, "invalid recipient")
+	}
+
+	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
+	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
 	}
 
 	allowance := GetAllowance(params.From, caller, params.Asset)
@@ -691,11 +713,19 @@ func HandleApprove(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
 	if !ok || amount.Sign() < 0 {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
+	}
+
+	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
+	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
 	}
 
 	SetAllowance(caller, params.Spender, params.Asset, amount)
@@ -807,7 +837,16 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			DestinationChain: destChain,
 		})
 
-		result := sdk.ContractCall(routerId, "execute", string(instrJSON), nil)
+		// A9 (RV re-verify): call the router with try/catch so a router that
+		// ABORTS does not trap this deposit's whole `map` (pre-fix: an aborting
+		// router reverted the entire deposit tx, the slot stayed unobserved, and
+		// the depositor-signed L1 calldata could never be changed — the deposit
+		// was permanently stuck). With Try, a router revert returns
+		// {"ok":false,...} and its state is rolled back, so we can fall through
+		// and credit the depositor in the original asset instead. (On a consensus
+		// line where try/catch is not yet active the node ignores Try and the
+		// legacy abort-propagates behaviour applies — no worse than before.)
+		result := sdk.ContractCall(routerId, "execute", string(instrJSON), &sdk.ContractCallOptions{Try: true})
 		// MED-34 (M23-F18): restore the allowance to the pre-grant snapshot
 		// (prevAllowance) so exactly THIS call's additive grant is removed and
 		// any concurrent routed deposit's residual survives. Magi WASM dispatch
@@ -817,9 +856,9 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		// self-credit is reversed below).
 		SetAllowance(selfAddr, routerSpender, asset, prevAllowance)
 
-		if result == nil {
-			// Router call failed. Reverse the self-balance credit and fall through
-			// to credit the depositor directly with the original asset.
+		if !tryCallSucceeded(result) {
+			// Router call failed/reverted. Reverse the self-balance credit and
+			// fall through to credit the depositor directly with the original asset.
 			DecBalance(selfAddr, asset, amount)
 			return dest
 		}
@@ -832,6 +871,61 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 func isPaused() bool {
 	data := sdk.StateGetObject(constants.PausedKey)
 	return data != nil && *data == "1"
+}
+
+// tryCallSucceeded reports whether a try/catch ContractCall (A9) succeeded.
+// With ContractCallOptions.Try the host returns a structured outcome
+// {"ok":bool,"result":...,"error":...}; a nil return, an unparseable body, or
+// "ok":false all mean the callee did not succeed. A plain (non-Try) call that
+// aborts traps the caller and never returns here, so this is only reached with
+// the structured body (or a genuine nil).
+func tryCallSucceeded(result *string) bool {
+	if result == nil {
+		return false
+	}
+	// When try/catch is chain-active the host returns {"ok":bool,...}; branch on
+	// it. When it is NOT active the node ignores Try and returns the callee's
+	// RAW result on success (and traps on revert, so we never get here on
+	// failure). So: an "ok" field present => use it; absent => any non-nil
+	// result is a legacy success. Using a pointer distinguishes "ok":false from
+	// a result that simply has no ok field.
+	var outcome struct {
+		Ok *bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(*result), &outcome); err != nil {
+		return true // non-JSON raw success result (legacy, Try inactive)
+	}
+	if outcome.Ok != nil {
+		return *outcome.Ok
+	}
+	return true
+}
+
+// E1 (RV re-verify): the ledger balance key is `a-{address}-{asset}` and the
+// allowance key is `q-{owner}-{spender}-{asset}`. Because `asset` was free-form,
+// a caller could pick an asset string that makes `a-{caller}-{asset}` collide
+// with another account's key — e.g. caller `hive:milo`, asset `hpr-eth` aliases
+// `a-hive:milo-hpr-eth`, the ETH balance of account `hive:milo-hpr`. Every
+// balance/allowance-mutating user path must therefore reject any asset that is
+// not the native "eth" or a token symbol this contract actually registered.
+// RegisterToken writes the `as-{symbol}` marker so this check is O(1) and needs
+// no symbol index. A fresh EVM deployment has no legacy balances to migrate.
+func isAllowedAsset(asset string) bool {
+	if asset == constants.NativeAsset {
+		return true
+	}
+	if asset == "" {
+		return false
+	}
+	marker := sdk.StateGetObject(constants.AllowedSymbolPrefix + asset)
+	return marker != nil && *marker == "1"
+}
+
+func requireAllowedAsset(asset string) error {
+	if !isAllowedAsset(asset) {
+		return ce.NewContractError(ce.ErrInput, "unknown asset: must be 'eth' or a registered token symbol")
+	}
+	return nil
 }
 
 // getTokenInfo / RegisterToken — W4 Cluster B CRIT #6 Site 10: token
@@ -878,12 +972,40 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 		key,
 		symbol+"|"+strconv.FormatUint(uint64(decimals), 10)+"|"+strconv.FormatInt(minWithdrawal, 10),
 	)
+	// E1 (RV re-verify): mark the symbol as an allowed ledger asset so
+	// transfer/approve/unmapFrom can reject any other free-form asset string.
+	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
+}
+
+// checkAuth refuses a fund-moving call that the sender did not sign with active
+// authority (A2). A posting signature also makes its signer the Caller, so
+// without this a posting key (often held by front ends) could transfer, approve
+// or unmap the account's funds. An L2 tx lists every DID that signed it in
+// RequiredAuths, so a did:pkh signer passes. Mirrors checkAuth in the BTC
+// mapping contract (mapping/utils.go).
+func checkAuth(env sdk.Env) error {
+	if !slices.Contains(env.Sender.RequiredAuths, env.Sender.Address) {
+		return ce.NewContractError(ce.ErrNoPermission, "active auth required to send funds")
+	}
+	return nil
 }
 
 func requireTssKey() error {
 	keyInfo := sdk.TssGetKey("primary")
 	if keyInfo == "" || keyInfo == "fail" {
 		return ce.NewContractError(ce.ErrAuth, "TSS key not available")
+	}
+	// A6 (RV re-verify): TssGetKey returns "status,pubkey,algo[,...]". Pre-fix we
+	// only rejected ""/"fail", so a DEPRECATED (or "deleted") key passed: the
+	// unmap debited the user and queued a pending spend, but the host then
+	// refused to sign it and there is no cancel path for a never-signed spend —
+	// funds stuck. Require the key be ACTIVE before committing any debit.
+	status := keyInfo
+	if i := strings.IndexByte(keyInfo, ','); i >= 0 {
+		status = keyInfo[:i]
+	}
+	if status != "active" {
+		return ce.NewContractError(ce.ErrAuth, "TSS key is not active (status: "+status+")")
 	}
 	return nil
 }
@@ -906,11 +1028,18 @@ func addGasReserve(amount *big.Int) {
 }
 
 func deductGasReserve(amount *big.Int) {
+	// RV-6 (RV re-verify): abort on underflow instead of clamping to 0. The
+	// pre-fix clamp hid an overdraw: TrackReserveSpend still debited the full
+	// gas estimate from Active("eth"), so when the estimate exceeded the reserve
+	// the gap came out of user-attributed ETH (Active < User) and the last ETH
+	// holders could not withdraw. Callers now verify reserve >= gasCost BEFORE
+	// signing, so reaching a negative here is a contract bug, not a user input.
 	current := getGasReserve()
-	current.Sub(current, amount)
-	if current.Sign() < 0 {
-		current.SetInt64(0)
+	if current.Cmp(amount) < 0 {
+		sdk.Abort("gas reserve underflow on deductGasReserve: reserve " +
+			current.String() + " < gas cost " + amount.String())
 	}
+	current.Sub(current, amount)
 	sdk.StateSetObject(constants.GasReserveKey, current.String())
 }
 
@@ -923,6 +1052,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	}
 
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
@@ -979,6 +1111,15 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		tokenInfo := getTokenInfo(chainId, tokenAddr)
 		if tokenInfo == nil {
 			return ErrInvalidToken
+		}
+		// RV-1 (RV re-verify): bind the DEBITED asset to the WITHDRAWN token.
+		// Pre-fix this path debited params.Asset (free-form) but signed a
+		// transfer of params.TokenAddress, so a caller with allowance on a cheap
+		// asset could drain an expensive token. unmapERC20 already keys off
+		// tokenInfo.Symbol; make unmapFrom match. (Also closes E1 on this path:
+		// params.Asset is now forced to the registered symbol.)
+		if params.Asset != tokenInfo.Symbol {
+			return ce.NewContractError(ce.ErrInput, "asset does not match the token's registered symbol")
 		}
 		if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 {
 			return ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
@@ -1079,6 +1220,13 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		if feeErr != nil {
 			return ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
 		}
+		// RV-6 (RV re-verify): require the reserve to actually cover this gas
+		// before spending it (the MinGasReserve floor is not enough at a high
+		// base fee; see unmapERC20). Prevents the reserve clamp from silently
+		// under-collateralizing ETH custody.
+		if getGasReserve().Cmp(gasReserveFee) < 0 {
+			return ce.NewContractError(ce.ErrBalance, "gas reserve cannot cover this withdrawal's L1 gas at the current base fee")
+		}
 		// Reserve is ETH custody — book the spend against Active("eth");
 		// restored via TrackReserveRestore if the tx is proven dropped.
 		deductGasReserve(gasReserveFee)
@@ -1111,11 +1259,19 @@ func HandleIncreaseAllowance(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
 	if !ok || amount.Sign() <= 0 {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
+	}
+
+	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
+	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
 	}
 
 	current := GetAllowance(caller, params.Spender, params.Asset)
@@ -1128,11 +1284,19 @@ func HandleDecreaseAllowance(params *AllowanceParams) error {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
 	env := sdk.GetEnv()
+	if err := checkAuth(env); err != nil {
+		return err
+	}
 	caller := env.Caller.String()
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
 	if !ok || amount.Sign() <= 0 {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
+	}
+
+	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
+	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
 	}
 
 	current := GetAllowance(caller, params.Spender, params.Asset)
@@ -1258,23 +1422,26 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 // refund cannot fail and "state advanced => user was refunded" holds
 // unconditionally (review6 X2's hard-fail guard is unnecessary here).
 func refundDroppedWithdrawal(ps *PendingSpend) {
-	gasCost := new(big.Int)
-	if ps.GasCost != nil {
-		gasCost.Set(ps.GasCost)
-	}
+	// E9 (RV re-verify): refund the tx VALUE only, NOT the gas.
+	//
+	// Every path that reaches here (clearNonce / cancelMyWithdrawal /
+	// expireWithdrawal) first passes verifyL1ProofOfDrop, and the only proof
+	// type that verifier still accepts is Type-A (reverted_receipt): the tx
+	// MINED and reverted, so the L1 gas was genuinely paid to the miner and that
+	// custody is gone — exactly like HandleConfirmSpend's reverted-receipt
+	// branch, which also returns value only. The pre-fix code added ps.GasCost
+	// back to the user (ETH path) and restored the gas reserve (ERC-20 path),
+	// refunding gas the vault had already spent — a slow drain a withdrawer
+	// could farm by repeatedly submitting reverting withdrawals. Only a
+	// genuinely-never-mined proof (Type-B, currently DISABLED/LOCKED per D-E-4)
+	// would justify refunding gas; if it is ever re-enabled it must restore the
+	// gas/reserve on its own path, not here.
 	refund := new(big.Int).Set(ps.Amount)
-	if ps.Asset == "eth" {
-		refund.Add(refund, gasCost)
-	}
 	IncBalance(ps.From, ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, refund)
 	sup.User.Add(sup.User, refund)
 	SetSupply(ps.Asset, sup)
-	if ps.Asset != "eth" && gasCost.Sign() > 0 {
-		addGasReserve(gasCost)
-		TrackReserveRestore(gasCost)
-	}
 }
 
 func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop) error {
@@ -1519,24 +1686,18 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 		// path (clearNonce, cancelMyWithdrawal, pre-window expireWithdrawal).
 		// Now the tx-trie proof cryptographically binds the nonce + sender
 		// to the proven L1 slot, closing the forgery class.
-		receiptBytes, err := hex.DecodeString(proof.ReceiptHex)
+		// EVM-T1: base64 proofs; the receipt and the tx are the proven leaves.
+		proofBytes, err := base64.StdEncoding.DecodeString(proof.ReceiptProof)
 		if err != nil {
-			return errors.New("invalid receipt_hex")
+			return errors.New("receipt_proof is not base64")
 		}
-		proofBytes, err := hex.DecodeString(proof.ReceiptProofHex)
-		if err != nil {
-			return errors.New("invalid receipt_proof_hex")
-		}
-		proven, err := mpt.VerifyProof(
+		receiptBytes, err := mpt.VerifyProof(
 			header.ReceiptsRoot,
 			mpt.RLPEncodeKey(proof.TxIndex),
 			splitProofNodes(proofBytes),
 		)
 		if err != nil {
 			return errors.New("receipt proof verification failed")
-		}
-		if !bytesEqual(proven, receiptBytes) {
-			return errors.New("receipt does not match proof")
 		}
 		// Parse status: receipt RLP first field after type-byte strip is status.
 		data := receiptBytes
@@ -1554,20 +1715,13 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 		// transactions trie at the SAME TxIndex. The raw tx carries the
 		// nonce + sender; verifying it lets us reject forged proofs where
 		// proof.TxNonce is decoupled from the proven L1 slot.
-		txBytes, err := hex.DecodeString(proof.TxAtIndexHex)
-		if err != nil || len(txBytes) == 0 {
-			return errors.New("Type A requires tx_at_index_hex bound to the proven receipt")
-		}
-		txProofBytes, err := hex.DecodeString(proof.TxProofHex)
+		txProofBytes, err := base64.StdEncoding.DecodeString(proof.TxProof)
 		if err != nil || len(txProofBytes) == 0 {
-			return errors.New("Type A requires tx_proof_hex for nonce binding")
+			return errors.New("Type A requires tx_proof (base64) for nonce binding")
 		}
-		provenTx, err := mpt.VerifyProof(header.TransactionsRoot, mpt.RLPEncodeKey(proof.TxIndex), splitProofNodes(txProofBytes))
+		txBytes, err := mpt.VerifyProof(header.TransactionsRoot, mpt.RLPEncodeKey(proof.TxIndex), splitProofNodes(txProofBytes))
 		if err != nil {
 			return errors.New("tx proof verification failed")
-		}
-		if !bytesEqual(provenTx, txBytes) {
-			return errors.New("tx does not match proof")
 		}
 		parsed, err := parseTransaction(txBytes)
 		if err != nil {
@@ -1688,14 +1842,13 @@ func verifyL1ProofOfDrop(proof *L1ProofOfDrop, ps *PendingSpend, chainId uint64)
 }
 
 // ConfirmSpendSchemaJSON — W4 Cluster E CRIT #5 (D-E-1) canonical wire
-// schema for the ConfirmSpendRequest payload (10 top-level fields).
-const ConfirmSpendSchemaJSON = `{"version":1,"type":"ConfirmSpendRequest","fields":[` +
+// schema for the ConfirmSpendRequest payload (8 top-level fields; version 2
+// since EVM-T1 dropped tx_hex/receipt_hex and moved the proofs to base64).
+const ConfirmSpendSchemaJSON = `{"version":2,"type":"ConfirmSpendRequest","fields":[` +
 	`{"name":"block_height","type":"uint64"},` +
 	`{"name":"tx_index","type":"uint64"},` +
-	`{"name":"tx_hex","type":"hex"},` +
-	`{"name":"tx_proof_hex","type":"hex"},` +
-	`{"name":"receipt_hex","type":"hex"},` +
-	`{"name":"receipt_proof_hex","type":"hex"},` +
+	`{"name":"tx_proof","type":"base64"},` +
+	`{"name":"receipt_proof","type":"base64"},` +
 	`{"name":"intent_nonce","type":"uint64"},` +
 	`{"name":"intent_to","type":"string"},` +
 	`{"name":"intent_amount","type":"string"},` +
