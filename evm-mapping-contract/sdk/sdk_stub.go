@@ -121,8 +121,15 @@ func tssRenewKey(keyId *string, epochs *string) *string { return nil }
 //go:wasmimport sdk tss.sign_key
 func tssSignKey(keyId *string, msgId *string) *string { return nil }
 
+// stubTssKey is what tss.get_key returns ("status,pubkey,algo"); nil emulates
+// no key. Test-only.
+var stubTssKey *string
+
+// StubSetTssKey sets the tss.get_key response. Test-only.
+func StubSetTssKey(info string) { stubTssKey = &info }
+
 //go:wasmimport sdk tss.get_key
-func tssGetKey(keyId *string) *string { return nil }
+func tssGetKey(keyId *string) *string { return stubTssKey }
 
 // var envMap = []string{
 // 	"contract.id",
@@ -240,6 +247,7 @@ func ResetStubState() {
 	ResetTestState()
 	stubContractCallResponder = nil
 	stubContractReadResponder = nil
+	stubTssKey = nil
 }
 
 // StubSetEnvJSON installs the JSON blob `getEnv` should return. Test-only.
