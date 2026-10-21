@@ -103,6 +103,12 @@ func assertNotPaused() {
 type initContractParams struct {
 	IsTestnet bool   `json:"is_testnet"`
 	ChainId   uint64 `json:"chain_id"`
+	// D6: optional first wiring. setVerifierContract and createKey carry the
+	// 400K-block (~14 day) timelock, so a fresh bridge took two weeks to take
+	// its first deposit. Nothing is held before init, so init may set them
+	// once; every later change goes through propose/execute.
+	VerifierContract string `json:"verifier_contract"`
+	CreateKey        bool   `json:"create_key"`
 }
 
 //go:wasmexport initContract
@@ -138,9 +144,19 @@ func initContract(input *string) *string {
 	if params.IsTestnet {
 		sdk.StateSetObject("is_testnet", "true")
 	}
+	if params.VerifierContract != "" {
+		sdk.StateSetObject(constants.VerifierContractIdKey, params.VerifierContract)
+	}
+	if params.CreateKey {
+		createPrimaryKey()
+	}
 	sdk.StateSetObject(constants.InitMarkerKey, "1")
 	return nil
 }
+
+// createPrimaryKey requests the bridge's TSS key, whose address is the vault
+// (A18).
+func createPrimaryKey() { sdk.TssCreateKey("primary", "ecdsa", 365) }
 
 // -----------------------------------------------------------------------------
 // User-facing wasmexports (NOT admin — no propose/execute wrapping)
@@ -451,7 +467,7 @@ func dispatchAdmin(action string, payload []byte) {
 
 	case "createKey":
 		assertNotPaused()
-		sdk.TssCreateKey("primary", "ecdsa", 365)
+		createPrimaryKey()
 
 	case "renewKey":
 		// CRIT #17 flag 1 / W4 Cluster F D-F-1: TssRenewKey extends
