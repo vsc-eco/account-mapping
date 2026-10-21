@@ -26,7 +26,7 @@ func IsWhitelistedRelayer(account string) bool {
 	if account == "" {
 		return false
 	}
-	data := sdk.StateGetObject(constants.RelayerRegistryPrefix + account)
+	data := sdk.StateGetObject(constants.RelayerRegistryPrefix + crypto.CanonicalIdentity(account))
 	return data != nil && *data == "1"
 }
 
@@ -34,11 +34,11 @@ func IsWhitelistedRelayer(account string) bool {
 // Called from the propose/execute dispatchAdmin switch in main.go after
 // the operational-class timelock elapses.
 func SetRelayer(account string) {
-	sdk.StateSetObject(constants.RelayerRegistryPrefix+account, "1")
+	sdk.StateSetObject(constants.RelayerRegistryPrefix+crypto.CanonicalIdentity(account), "1")
 }
 
 func UnsetRelayer(account string) {
-	sdk.StateDeleteObject(constants.RelayerRegistryPrefix + account)
+	sdk.StateDeleteObject(constants.RelayerRegistryPrefix + crypto.CanonicalIdentity(account))
 }
 
 // AssertNotPaused — exported so main.go dispatchAdmin can gate every
@@ -164,7 +164,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// untrusted and ignored here. Cross-account routing / swaps for tokens
 		// require a future depositor-signed mechanism (e.g. a deposit-wrapper
 		// EVM contract that emits an instruction-bearing event).
-		dest := crypto.AddressToDID(sender, chainId)
+		dest := crypto.AddressToDID(sender)
 		IncBalance(dest, tokenInfo.Symbol, amount)
 		TrackDeposit(tokenInfo.Symbol, amount, new(big.Int))
 		// CRIT #8 / W4 Cluster A + CRIT #14 logIndex: lock observed slot
@@ -783,7 +783,7 @@ func hasToReserveInstruction(instructions []string) bool {
 // sender's DID) because a Transfer event carries no depositor-signed intent.
 // chainId is threaded so the default DID derives from the deposit chain.
 func routeDeposit(sender [20]byte, instructions []string, asset string, amount *big.Int, chainId uint64) string {
-	did := crypto.AddressToDID(sender, chainId)
+	did := crypto.AddressToDID(sender)
 	dest := did
 	var swapTo, assetOut, destChain string
 
@@ -1551,7 +1551,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
-	isOriginalWithdrawer := caller == ps.From
+	isOriginalWithdrawer := crypto.SameIdentity(caller, ps.From)
 	expiryHeight := ps.BlockHeight + constants.WithdrawalExpiryWindow
 	hasExpired := env.BlockHeight >= expiryHeight
 
@@ -1624,7 +1624,7 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 		return errors.New("no pending spend at nonce")
 	}
 	env := sdk.GetEnv()
-	if env.Caller.String() != ps.From {
+	if !crypto.SameIdentity(env.Caller.String(), ps.From) {
 		return errors.New("cancelMyWithdrawal: only the original withdrawer can cancel")
 	}
 	if proof.Type == "" {

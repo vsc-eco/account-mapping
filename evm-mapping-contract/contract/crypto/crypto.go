@@ -3,7 +3,6 @@ package crypto
 import (
 	"encoding/hex"
 	ce "evm-mapping-contract/contract/contracterrors"
-	"strconv"
 	"strings"
 
 	"evm-mapping-contract/sdk"
@@ -80,20 +79,65 @@ func AddressToHex(addr [20]byte) string {
 	return "0x" + hex.EncodeToString(addr[:])
 }
 
-// AddressToDID — W4 Cluster B CRIT #6 Site 3 + CRIT #29 forward-proof:
-// the chainId is now read from contract state and threaded into the
-// did:pkh literal. Previously hardcoded "did:pkh:eip155:1:" which produced
-// mainnet-prefixed DIDs even on testnet. Site 11 (evm-mapping.wasm data
-// section) auto-changes when this Go literal changes — recompile the WASM
-// and the rodata segment will drop the "eip155:1:" string; CID changes;
-// operator runbook P5 covers redeploy logistics.
+// L2IdentityPrefix is the did:pkh namespace the Magi node authenticates
+// (go-vsc-node lib/dids EthDIDPrefix): an Ethereum key's L2 identity is
+// did:pkh:eip155:1:<address> whichever L1 chain this bridge reads.
+const L2IdentityPrefix = "did:pkh:eip155:1:"
+
+// AddressToDID is the L2 identity of an L1 address: did:pkh:eip155:1: and the
+// EIP-55 address, the identity the node authenticates, the gateway credits
+// (EvmAddressChecksumHeight) and charges RC to.
 //
-// Migration policy (CRIT-FIX-MAP §11.3): NEW DIDs use correct chainId
-// after this change; OLD testnet DIDs still have `:1:` literal. Testnet
-// redeploy wipes DID registry; mainnet is fresh deploy so all DIDs are
-// chainId-correct from genesis.
-func AddressToDID(addr [20]byte, chainId uint64) string {
-	return "did:pkh:eip155:" + strconv.FormatUint(chainId, 10) + ":" + AddressToHex(addr)
+// C6 / E21: this used to build did:pkh:eip155:<chainId>:<lowercase>. On any
+// chain but 1 that is a DID the node cannot parse, so nobody could sign as the
+// credited identity; on chain 1 it split one user in two (ETH on the lowercase
+// DID, HBD and RC on the EIP-55 one), and the user could withdraw under neither.
+func AddressToDID(addr [20]byte) string {
+	return L2IdentityPrefix + ChecksumHex(addr)
+}
+
+// ChecksumHex is the EIP-55 mixed-case hex of addr, with the 0x prefix.
+func ChecksumHex(addr [20]byte) string {
+	lower := []byte(hex.EncodeToString(addr[:]))
+	h := Keccak256(lower)
+	for i, c := range lower {
+		if c < 'a' || c > 'f' {
+			continue
+		}
+		nib := h[i/2] >> 4
+		if i%2 == 1 {
+			nib = h[i/2] & 0x0f
+		}
+		if nib >= 8 {
+			lower[i] = c - ('a' - 'A')
+		}
+	}
+	return "0x" + string(lower)
+}
+
+// CanonicalIdentity rewrites a did:pkh:eip155:1 identity in any letter case
+// (the node verifies its signature case-insensitively, so every casing is the
+// same key holder) to AddressToDID's form; any other identity is returned as
+// is. Every state key the contract builds from an identity goes through it, so
+// one Ethereum address has one balance, allowance and relayer entry.
+func CanonicalIdentity(id string) string {
+	if len(id) <= len(L2IdentityPrefix) || !strings.EqualFold(id[:len(L2IdentityPrefix)], L2IdentityPrefix) {
+		return id
+	}
+	hexAddr := id[len(L2IdentityPrefix):]
+	if strings.HasPrefix(hexAddr, "0X") { // the node accepts either prefix case
+		hexAddr = "0x" + hexAddr[2:]
+	}
+	addr, err := HexToAddress(hexAddr)
+	if err != nil {
+		return id
+	}
+	return AddressToDID(addr)
+}
+
+// SameIdentity reports whether a and b are the same identity once canonical.
+func SameIdentity(a, b string) bool {
+	return CanonicalIdentity(a) == CanonicalIdentity(b)
 }
 
 func HexToAddress(s string) ([20]byte, error) {

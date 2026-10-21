@@ -124,7 +124,7 @@ func TestReview6Followup_RouteDepositETHHonorsInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	const chainId uint64 = 1
-	expectedDID := crypto.AddressToDID(sender, chainId)
+	expectedDID := crypto.AddressToDID(sender)
 
 	sdk.ResetStubState()
 	sdk.StateSetObject(constants.RouterContractIdKey, "vsc1routerstub")

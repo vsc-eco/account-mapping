@@ -3,6 +3,7 @@ package mapping
 import (
 	"evm-mapping-contract/contract/constants"
 	ce "evm-mapping-contract/contract/contracterrors"
+	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/sdk"
 	"math/big"
 )
@@ -68,11 +69,11 @@ func safeGasFee(gasUnits, baseFeePerGas, multiplier, gasTipCap uint64) (uint64, 
 // adversarial-review commit is unnecessary on this base.
 
 func balanceKey(address, asset string) string {
-	return constants.BalancePrefix + address + constants.DirPathDelimiter + asset
+	return constants.BalancePrefix + crypto.CanonicalIdentity(address) + constants.DirPathDelimiter + asset
 }
 
 func allowanceKey(owner, spender, asset string) string {
-	return constants.AllowancePrefix + owner + constants.AllowanceDelimiter + spender + constants.AllowanceDelimiter + asset
+	return constants.AllowancePrefix + crypto.CanonicalIdentity(owner) + constants.AllowanceDelimiter + crypto.CanonicalIdentity(spender) + constants.AllowanceDelimiter + asset
 }
 
 // GetBalance returns the caller's ledger balance in the asset's native unit
