@@ -47,6 +47,8 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 - 6 hours: `registerToken`, `registerRouter`, `registerRelayer`, `deregisterRelayer`, `clearTestnetState`
 - immediate: `pause`, `unpause`, `renewKey` (also while paused)
 
+Every unmap needs a gas reserve of at least 0.05 ETH (`MinGasReserve`). A fresh bridge's reserve is 0 and grows by 1% of each ETH deposit, so seed it: an ETH deposit to the vault whose calldata is `to_reserve=1` goes wholly to the reserve.
+
 The `primary` key expires 365 epochs (~91 days) after keygen and retires ~14 days after that; a retired key can never sign, so every deposit in the vault would stay there. Run `renewKey` before expiry (the bot warns from 7 days out, and when the key has expired).
 
 ## Repo Layout
