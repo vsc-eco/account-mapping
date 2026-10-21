@@ -72,7 +72,7 @@ func balanceKey(address, asset string) string {
 }
 
 func allowanceKey(owner, spender, asset string) string {
-	return constants.AllowancePrefix + owner + constants.DirPathDelimiter + spender + constants.DirPathDelimiter + asset
+	return constants.AllowancePrefix + owner + constants.AllowanceDelimiter + spender + constants.AllowanceDelimiter + asset
 }
 
 // GetBalance returns the caller's ledger balance in the asset's native unit

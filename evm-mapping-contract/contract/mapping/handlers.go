@@ -652,10 +652,10 @@ func HandleTransfer(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
-	// review2 #43: an empty recipient credited the "" address, making the
-	// funds permanently unspendable. Reject it.
-	if params.To == "" {
-		return ce.NewContractError(ce.ErrInput, "invalid recipient")
+	// review2 #43 / A5: a recipient that is not a Magi identity (empty, or a
+	// malformed name) would hold funds no one can sign for. Reject it.
+	if err := requireValidRecipient(params.To); err != nil {
+		return err
 	}
 
 	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
@@ -685,9 +685,9 @@ func HandleTransferFrom(params *TransferParams) error {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
 
-	// review2 #43: reject empty recipient (funds would be unspendable).
-	if params.To == "" {
-		return ce.NewContractError(ce.ErrInput, "invalid recipient")
+	// review2 #43 / A5: reject a recipient that is not a Magi identity.
+	if err := requireValidRecipient(params.To); err != nil {
+		return err
 	}
 
 	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
@@ -725,6 +725,10 @@ func HandleApprove(params *AllowanceParams) error {
 
 	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
 	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
+	}
+	// ALLOW-1: the spender must be a Magi identity (see constants.AllowanceDelimiter).
+	if err := requireValidSpender(params.Spender); err != nil {
 		return err
 	}
 
@@ -794,10 +798,13 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		return dest
 	}
 	for _, instr := range instructions {
-		if len(instr) > 11 && instr[:11] == "deposit_to=" {
+		// A5: a destination that is not a Magi identity is ignored and the
+		// deposit stays with the depositor. Refusing the map instead would
+		// strand the ETH on L1, since the depositor-signed calldata is final.
+		if len(instr) > 11 && instr[:11] == "deposit_to=" && validIdentity(instr[11:]) {
 			dest = instr[11:]
 		}
-		if len(instr) > 8 && instr[:8] == "swap_to=" {
+		if len(instr) > 8 && instr[:8] == "swap_to=" && validIdentity(instr[8:]) {
 			swapTo = instr[8:]
 		}
 		if len(instr) > 10 && instr[:10] == "asset_out=" {
@@ -983,6 +990,26 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 // or unmap the account's funds. An L2 tx lists every DID that signed it in
 // RequiredAuths, so a did:pkh signer passes. Mirrors checkAuth in the BTC
 // mapping contract (mapping/utils.go).
+// validIdentity reports whether addr is a Magi identity the runtime recognises
+// (user, key, contract or system address), per the node's system.verify_address.
+func validIdentity(addr string) bool {
+	return sdk.VerifyAddress(addr) != string(sdk.AddressDomainUnknown)
+}
+
+func requireValidRecipient(to string) error {
+	if !validIdentity(to) {
+		return ce.NewContractError(ce.ErrInput, "invalid recipient address \""+to+"\"")
+	}
+	return nil
+}
+
+func requireValidSpender(spender string) error {
+	if !validIdentity(spender) {
+		return ce.NewContractError(ce.ErrInput, "invalid spender address \""+spender+"\"")
+	}
+	return nil
+}
+
 func checkAuth(env sdk.Env) error {
 	if !slices.Contains(env.Sender.RequiredAuths, env.Sender.Address) {
 		return ce.NewContractError(ce.ErrNoPermission, "active auth required to send funds")
@@ -1273,6 +1300,10 @@ func HandleIncreaseAllowance(params *AllowanceParams) error {
 	if err := requireAllowedAsset(params.Asset); err != nil {
 		return err
 	}
+	// ALLOW-1: the spender must be a Magi identity (see constants.AllowanceDelimiter).
+	if err := requireValidSpender(params.Spender); err != nil {
+		return err
+	}
 
 	current := GetAllowance(caller, params.Spender, params.Asset)
 	SetAllowance(caller, params.Spender, params.Asset, new(big.Int).Add(current, amount))
@@ -1296,6 +1327,10 @@ func HandleDecreaseAllowance(params *AllowanceParams) error {
 
 	// E1 (RV re-verify): reject free-form assets that would inject ledger keys.
 	if err := requireAllowedAsset(params.Asset); err != nil {
+		return err
+	}
+	// ALLOW-1: the spender must be a Magi identity (see constants.AllowanceDelimiter).
+	if err := requireValidSpender(params.Spender); err != nil {
 		return err
 	}
 

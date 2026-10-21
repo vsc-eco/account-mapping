@@ -571,6 +571,10 @@ func dispatchAdmin(action string, payload []byte) {
 		if p.Account == "" {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerRelayer: empty account"))
 		}
+		// A5: a relayer must be a Magi identity that can sign the map call.
+		if sdk.VerifyAddress(p.Account) == string(sdk.AddressDomainUnknown) {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerRelayer: invalid account \""+p.Account+"\""))
+		}
 		mapping.SetRelayer(p.Account)
 
 	case "deregisterRelayer":

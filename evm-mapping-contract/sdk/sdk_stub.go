@@ -4,6 +4,8 @@ package sdk
 
 import (
 	"encoding/hex"
+	"regexp"
+	"strings"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"golang.org/x/crypto/sha3"
@@ -62,7 +64,40 @@ func getEnvKey(arg *string) *string {
 }
 
 //go:wasmimport sdk system.verify_address
-func verifyAddress(arg *string) *string { return nil }
+func verifyAddress(arg *string) *string {
+	r := stubVerifyAddress(*arg)
+	return &r
+}
+
+// stubHiveName is the node's Hive username rule (go-vsc-node lib/dids hivePattern).
+var stubHiveName = regexp.MustCompile(`^[a-z][0-9a-z\-]*[0-9a-z](\.[a-z][0-9a-z\-]*[0-9a-z])*$`)
+
+// stubVerifyAddress mirrors the node's dids.VerifyAddress (system.verify_address)
+// for the identities this contract handles. The node also base58check-decodes
+// contract ids; the stub only checks their shape.
+func stubVerifyAddress(a string) string {
+	switch {
+	case strings.HasPrefix(a, "did:pkh:eip155:1:"):
+		h := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(a, "did:pkh:eip155:1:"), "0x"), "0X")
+		if _, err := hex.DecodeString(h); err == nil && len(h) == 40 {
+			return "user:evm"
+		}
+	case strings.HasPrefix(a, "hive:"):
+		u := strings.TrimPrefix(a, "hive:")
+		if stubHiveName.MatchString(u) && len(u) >= 3 && len(u) < 17 {
+			return "user:hive"
+		}
+	case strings.HasPrefix(a, "contract:"):
+		if id := strings.TrimPrefix(a, "contract:"); strings.HasPrefix(id, "vsc1") && len(id) == 38 {
+			return "contract"
+		}
+	case strings.HasPrefix(a, "system:"):
+		if len(a) > len("system:") {
+			return "system"
+		}
+	}
+	return "unknown"
+}
 
 //go:wasmimport sdk hive.get_balance
 func getBalance(arg1 *string, arg2 *string) *string { return nil }
