@@ -29,7 +29,7 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 - `unmapETH` — withdraw native ETH to an external address
 - `unmapERC20` — withdraw a registered ERC-20 token
 - `unmapFrom` — withdraw on behalf of a third party via allowance
-- `rollWithdrawal` — after 1200 verified L1 blocks, anyone may roll back a withdrawal that never mined: the vault signs a 0-value self-transfer at its nonce, and `confirmSpend` refunds the withdrawer once that mines
+- `rollWithdrawal` — after 1200 verified L1 blocks, anyone may roll back a withdrawal that never mined: the vault signs a 0-value self-transfer at its nonce, and `confirmSpend` refunds the withdrawer once that mines. The refund is the withdrawal's amount; the L1 fee prepaid with it is not returned (the vault pays for the roll itself)
 - `expireWithdrawal` / `cancelMyWithdrawal` — release a withdrawal that can no longer complete
 
 **Chain relay:** none in this contract. Block headers come from the ZK header verifier contract (`zk-header-verifier`), read through `zkverifier`.
