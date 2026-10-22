@@ -13,3 +13,6 @@ const (
 	TimelockOperational uint64 = 7_200   // Operational (~6 hours)
 	TimelockImmediate   uint64 = 0       // Emergency: pause / unpause
 )
+
+// FastTimelockBuild is false in this build (see timelock_windows_devnet.go).
+const FastTimelockBuild = false
