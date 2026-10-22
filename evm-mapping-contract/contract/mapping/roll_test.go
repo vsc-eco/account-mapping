@@ -179,6 +179,43 @@ func TestD3_WithdrawalMinedAfterARollSettlesNormally(t *testing.T) {
 	}
 }
 
+// A rolled ERC-20 withdrawal that mines after all is also a 0-value transfer
+// signed by the vault at that nonce, but to the token contract: it settles as
+// usual, and only a 0-value transfer to the vault itself is the roll. Without
+// the destination check the token transfer would be refunded as well: paid
+// out on L1 and credited back on Magi.
+func TestD3_ERC20WithdrawalMinedAfterARollIsNotRefunded(t *testing.T) {
+	w := newRollWorld(t)
+	defer sdk.ResetStubState()
+	token, _ := crypto.HexToAddress("0x00000000000000000000000000000000000000a0")
+	to, _ := crypto.HexToAddress("0x00000000000000000000000000000000000000e2")
+	amount := big.NewInt(5_000_000)
+	orig := hex.EncodeToString(BuildERC20WithdrawalTx(1, 0, 2_000_000_000, 40_000_000_000, token, to, amount))
+	StorePendingSpend(PendingSpend{Nonce: 0, Amount: amount, From: "hive:alice", To: "0x00000000000000000000000000000000000000e2",
+		Asset: "usdc", TokenAddress: "0x00000000000000000000000000000000000000a0", UnsignedTxHex: orig, BlockHeight: 100,
+		VaultAtQueue: senderAddrFromPriv(t, rollVaultPriv), GasCost: big.NewInt(0)})
+	SetSupply("usdc", Supply{Active: new(big.Int), User: new(big.Int), Fee: new(big.Int)})
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err != nil {
+		t.Fatal(err)
+	}
+	if !GetPendingSpend(0).Rolled {
+		t.Fatal("the withdrawal was not marked rolled")
+	}
+	req := w.mine(w.last+1, orig, 1)
+	req.IntentAsset, req.IntentAmount = "usdc", amount.String()
+	if err := HandleConfirmSpend(req, 1); err != nil {
+		t.Fatalf("confirmSpend for the mined ERC-20 withdrawal: %v", err)
+	}
+	if got := GetBalance("hive:alice", "usdc"); got.Sign() != 0 {
+		t.Fatalf("withdrawer credited %s although the token transfer mined", got)
+	}
+	if GetConfirmedNonce() != 1 || GetPendingSpend(0) != nil {
+		t.Fatalf("queue not advanced: n=%d", GetConfirmedNonce())
+	}
+}
+
 // Without a roll, a 0-value self-transfer at the nonce is not a settlement.
 func TestD3_SelfTransferWithoutARollIsRefused(t *testing.T) {
 	w := newRollWorld(t)
