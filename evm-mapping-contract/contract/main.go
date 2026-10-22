@@ -137,6 +137,11 @@ func initContract(input *string) *string {
 	if params.ChainId == 0 {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "initContract requires a non-zero chain_id"))
 	}
+	// A-1: the devnet_fasttimelock build (admin timelocks of a few blocks) is
+	// a test fixture; it initializes only as a testnet bridge.
+	if admin.FastTimelockBuild && !params.IsTestnet {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "this build has devnet timelocks (devnet_fasttimelock): initContract requires is_testnet"))
+	}
 	sdk.StateSetObject(constants.ChainIdKey, strconv.FormatUint(params.ChainId, 10))
 	// review6 H2: OracleAccountKey is no longer written at init — the
 	// oracle-fed addBlocks path was removed; headers come from the ZK

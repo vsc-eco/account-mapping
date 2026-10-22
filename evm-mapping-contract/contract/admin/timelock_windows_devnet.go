@@ -20,3 +20,8 @@ const (
 	TimelockOperational uint64 = 3 // prod 7_200
 	TimelockImmediate   uint64 = 0 // unchanged (emergency)
 )
+
+// FastTimelockBuild marks this build: initContract refuses to set it up
+// without is_testnet (A-1), so a devnet wasm deployed by mistake cannot run a
+// bridge whose owner actions wait a few blocks instead of up to 14 days.
+const FastTimelockBuild = true

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"evm-mapping-contract/contract/admin"
 	"evm-mapping-contract/contract/constants"
 	"evm-mapping-contract/sdk"
 )
@@ -14,6 +15,9 @@ import (
 func TestD6_InitWiresTheVerifierAndKeyOnce(t *testing.T) {
 	const owner = "hive:magi.bridge.owner"
 	run := func(in string) (msg string) {
+		if admin.FastTimelockBuild { // A-1: that build initializes only as a testnet bridge
+			in = strings.Replace(in, "{", `{"is_testnet":true,`, 1)
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				msg, _ = r.(string)
