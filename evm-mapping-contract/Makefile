@@ -31,8 +31,11 @@ GOWORK_EXTRA_MOUNTS := $(if $(wildcard go.work),$(shell \
     [ -d "$$host" ] && printf -- '-v %s:%s ' "$$host" "$$ctr"; \
   done),)
 
+# As the calling user (the files it writes stay theirs), so Go's module and
+# build caches go to /tmp: the image's /go is not writable for that user.
 TINYGO_CMD = docker run --rm \
     -u $(shell id -u):$(shell id -g) \
+    -e HOME=/tmp -e GOPATH=/tmp/go -e GOCACHE=/tmp/gocache \
     $(GOWORK_EXTRA_MOUNTS) \
     -v $(CURDIR):$(WORKDIR) \
     -w $(WORKDIR) \
