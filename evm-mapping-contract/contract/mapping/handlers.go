@@ -1019,13 +1019,30 @@ func getTokenInfo(chainId uint64, addr [20]byte) *TokenInfo {
 }
 
 // RegisterToken — W4 Cluster B CRIT #6 Site 10: store key now includes chainId.
-func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8, minWithdrawal int64) {
-	key := constants.TokenRegistryPrefix + strconv.FormatUint(
-		chainId,
-		10,
-	) + constants.DirPathDelimiter + hex.EncodeToString(
-		addr[:],
-	)
+//
+// M15-N5: a ledger symbol belongs to one token. Deposits credit the ledger
+// asset named by the depositing token's symbol and unmapERC20 pays out the
+// token it is given, so a second token registered under "usdc" would credit
+// real usdc balances with whatever it is worth, withdrawable as the first
+// token. And a registered token's symbol cannot change: its balances and
+// supply sit under the old symbol, which unmapERC20 and unmapFrom (RV-1) would
+// no longer accept for that token. Re-registering a token under its own
+// symbol (to change decimals or min_withdrawal) is allowed.
+func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8, minWithdrawal int64) error {
+	ref := strconv.FormatUint(chainId, 10) + constants.DirPathDelimiter + hex.EncodeToString(addr[:])
+	cur := getTokenInfo(chainId, addr)
+	if cur != nil && cur.Symbol != symbol {
+		return errors.New("token is registered as " + cur.Symbol + ": its symbol cannot change")
+	}
+	if owner := sdk.StateGetObject(constants.TokenSymbolPrefix + symbol); owner != nil && *owner != ref {
+		return errors.New("symbol " + symbol + " belongs to token " + *owner)
+	}
+	// A symbol registered before the ts- index existed has its as- marker but
+	// no owner record; it belongs to another token unless it is this one's.
+	if cur == nil && isAllowedAsset(symbol) {
+		return errors.New("symbol " + symbol + " is already a registered asset")
+	}
+	key := constants.TokenRegistryPrefix + ref
 	sdk.StateSetObject(
 		key,
 		symbol+"|"+strconv.FormatUint(uint64(decimals), 10)+"|"+strconv.FormatInt(minWithdrawal, 10),
@@ -1033,6 +1050,8 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 	// E1 (RV re-verify): mark the symbol as an allowed ledger asset so
 	// transfer/approve/unmapFrom can reject any other free-form asset string.
 	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
+	sdk.StateSetObject(constants.TokenSymbolPrefix+symbol, ref)
+	return nil
 }
 
 // checkAuth refuses a fund-moving call that the sender did not sign with active

@@ -88,6 +88,11 @@ const (
 	NativeAsset         = "eth"
 	AllowedSymbolPrefix = "as" + DirPathDelimiter // as-{symbol} → "1"
 
+	// M15-N5: TokenSymbolPrefix+{symbol} names the one token a symbol belongs
+	// to ("{chainId}-{address hex}"), so RegisterToken can refuse a second token
+	// under the same ledger symbol.
+	TokenSymbolPrefix = "ts" + DirPathDelimiter // ts-{symbol} → {chainId}-{address hex}
+
 	// W4 Cluster C (v20 §BD): oracle account allowed to call addBlocks
 	// without going through the propose/execute timelock. addBlocks must
 	// remain a high-frequency operational path for the oracle relay; the

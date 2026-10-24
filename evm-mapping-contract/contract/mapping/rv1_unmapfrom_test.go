@@ -39,8 +39,12 @@ func TestRV1_UnmapFromBindsTheAssetToTheToken(t *testing.T) {
 
 	var cheap, valuable [20]byte
 	cheap[19], valuable[19] = 0x01, 0x02
-	RegisterToken(chainId, cheap, "CHEAP", 6, 1)
-	RegisterToken(chainId, valuable, "WBTC", 8, 1)
+	if err := RegisterToken(chainId, cheap, "CHEAP", 6, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterToken(chainId, valuable, "WBTC", 8, 1); err != nil {
+		t.Fatal(err)
+	}
 
 	sdk.StubSetTssKey("active,02aa,ecdsa")
 	sdk.SetTestCaller("hive:spender")

@@ -566,7 +566,9 @@ func dispatchAdmin(action string, payload []byte) {
 		if p.MinWithdrawal < 0 || p.MinWithdrawal > constants.MaxTokenMinWithdrawal {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal out of range"))
 		}
-		mapping.RegisterToken(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal)
+		if err := mapping.RegisterToken(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: "+err.Error()))
+		}
 
 	case "registerRouter":
 		assertNotPaused()
