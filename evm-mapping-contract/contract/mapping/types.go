@@ -15,8 +15,9 @@ type VerificationRequest struct {
 	LogIndex       uint64 `json:"log_index"`
 	TokenAddress   string `json:"token_address"`
 	DepositType    string `json:"deposit_type"` // "eth", "erc20" or "contract" (RP-7)
-	// RP-7, deposit_type "contract": base64 of the concatenated receipt-trie
-	// MPT nodes; the leaf is the receipt (not sent on its own, EVM-T1).
+	// deposit_type "contract" (RP-7), and "erc20" in place of raw_hex +
+	// merkle_proof_hex (ERC20-PAYLOAD-1): base64 of the concatenated
+	// receipt-trie MPT nodes; the leaf is the receipt (not sent on its own, EVM-T1).
 	ReceiptProof string `json:"receipt_proof,omitempty"`
 }
 

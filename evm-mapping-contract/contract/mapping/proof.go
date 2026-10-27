@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"evm-mapping-contract/contract/blocklist"
@@ -152,26 +153,42 @@ func VerifyERC20Deposit(
 		return sender, nil, txHash, ErrChainIdMismatch
 	}
 
-	receiptBytes, err := hex.DecodeString(req.RawHex)
-	if err != nil {
-		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
-	}
-
-	proofBytes, err := hex.DecodeString(req.MerkleProofHex)
-	if err != nil {
-		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
-	}
-
-	proof := splitProofNodes(proofBytes)
+	// ERC20-PAYLOAD-1: the receipt proof may come base64 with the receipt as
+	// its leaf (receipt_proof, EVM-T1), or hex with the receipt sent again
+	// (raw_hex + merkle_proof_hex). The hex form carries the receipt four
+	// times over in the payload, so under the 8,192-byte cap a deposit in a
+	// tx with more than ~5 logs (an aggregator, a batch payout) could never be
+	// mapped; base64 fits ~4x the receipt. Both prove the same receipt and use
+	// the same observed key, so one cannot map a deposit the other did.
+	var receiptBytes []byte
 	key := mpt.RLPEncodeKey(req.TxIndex)
-
-	value, err := mpt.VerifyProof(header.ReceiptsRoot, key, proof)
-	if err != nil {
-		return sender, nil, txHash, ErrProofFailed
-	}
-
-	if !bytesEqual(value, receiptBytes) {
-		return sender, nil, txHash, ErrProofFailed
+	if req.ReceiptProof != "" {
+		proofBytes, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
+		if err != nil || len(proofBytes) == 0 {
+			return sender, nil, txHash, ce.NewContractError(ce.ErrInput, "receipt_proof must be base64 (concatenated receipt-trie MPT nodes)")
+		}
+		value, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		receiptBytes = value
+	} else {
+		raw, err := hex.DecodeString(req.RawHex)
+		if err != nil {
+			return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
+		}
+		proofBytes, err := hex.DecodeString(req.MerkleProofHex)
+		if err != nil {
+			return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
+		}
+		value, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		if !bytesEqual(value, raw) {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		receiptBytes = raw
 	}
 
 	// review6 M4: dedup key was previously keccak(receiptBytes), which is

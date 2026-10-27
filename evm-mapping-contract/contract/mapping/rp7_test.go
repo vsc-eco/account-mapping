@@ -3,6 +3,7 @@ package mapping
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"strconv"
 	"strings"
@@ -252,5 +253,44 @@ func TestRP7_AnotherChainsHeaderIsRefused(t *testing.T) {
 	w.headers[n] = h.Serialize()
 	if err := mapContract(n, nodes, 0); err == nil || !strings.Contains(err.Error(), "chain id") {
 		t.Fatalf("a deposit under a Sepolia-labelled header on chain 1: %v", err)
+	}
+}
+
+func mapERC20B64(n uint64, nodes [][]byte, logIndex uint64) error {
+	return HandleMap(&MapParams{TxData: VerificationRequest{BlockHeight: n, TxIndex: 1, LogIndex: logIndex, DepositType: "erc20",
+		ReceiptProof: base64.StdEncoding.EncodeToString(concatBytes(nodes)), TokenAddress: "0x" + hex.EncodeToString(rp7USDC[:])}}, rp7Vault, 1)
+}
+
+// ERC20-PAYLOAD-1: an ERC-20 deposit maps from a base64 receipt proof (the
+// receipt taken from its leaf), and the same deposit cannot then be mapped
+// again in the hex form, or the reverse. A receipt with 30 logs fits the
+// node's 8,192-byte payload only this way.
+func TestERC20PAYLOAD1_Base64ReceiptProof(t *testing.T) {
+	w := newRP7World(t)
+	logs := [][]byte{transferLog(rp7USDC, rp7User, rp7Vault, 3_000_000)}
+	for i := 0; i < 29; i++ { // an aggregator's swap logs around the transfer
+		logs = append(logs, transferLog([20]byte{byte(i + 1)}, [20]byte{2}, [20]byte{3}, int64(i+1)))
+	}
+	n, receipt, nodes := w.mine(1, logs...)
+	b64, _ := json.Marshal(VerificationRequest{BlockHeight: n, TxIndex: 1, DepositType: "erc20", TokenAddress: "0x" + hex.EncodeToString(rp7USDC[:]),
+		ReceiptProof: base64.StdEncoding.EncodeToString(concatBytes(nodes))})
+	hexForm, _ := json.Marshal(VerificationRequest{BlockHeight: n, TxIndex: 1, DepositType: "erc20", TokenAddress: "0x" + hex.EncodeToString(rp7USDC[:]),
+		RawHex: hex.EncodeToString(receipt), MerkleProofHex: hex.EncodeToString(concatBytes(nodes))})
+	if len(hexForm) <= 8192 || len(b64) > 8192 {
+		t.Fatalf("payloads: hex %d B, base64 %d B; want the hex form over the 8,192 cap and base64 under it", len(hexForm), len(b64))
+	}
+	if err := mapERC20B64(n, nodes, 0); err != nil {
+		t.Fatalf("base64 map: %v", err)
+	}
+	if got := GetBalance(crypto.AddressToDID(rp7User), "USDC"); got.Cmp(big.NewInt(3_000_000)) != 0 {
+		t.Fatalf("credited %s, want 3000000", got)
+	}
+	if err := mapERC20(n, receipt, nodes, 0); err == nil || !strings.Contains(err.Error(), "already processed") {
+		t.Fatalf("the hex form after the base64 map: %v, want already processed", err)
+	}
+	// A base64 proof that is not the block's receipt is refused.
+	_, _, otherNodes := w.mine(1, transferLog(rp7USDC, rp7User, rp7Vault, 9))
+	if err := mapERC20B64(n, otherNodes, 0); err == nil {
+		t.Fatal("another block's receipt proof was accepted")
 	}
 }
