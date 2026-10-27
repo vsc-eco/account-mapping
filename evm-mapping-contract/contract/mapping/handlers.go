@@ -217,6 +217,10 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if err := failFastOverCap(gas, feeCap); err != nil {
 		return "", err
 	}
+	// Issued in this call: debit the exact fee, so issue refunds nothing.
+	if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) <= 0 {
+		feeCap = fee
+	}
 	// The fee is priced when the withdrawal is issued (RP-11); the caller
 	// authorizes up to feeCap and gets the unused part back at issue.
 	//   fee on top:   debit = amount + feeCap, L1 value = amount
@@ -1273,6 +1277,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		}
 		if ferr := failFastOverCap(gas, feeCap); ferr != nil {
 			return ferr
+		}
+		if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) <= 0 {
+			feeCap = fee
 		}
 		if params.DeductFee {
 			if amount.Cmp(feeCap) <= 0 {

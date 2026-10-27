@@ -98,6 +98,16 @@ func TestRP11_ManyUsersWithdrawAtOnceNoneRefused(t *testing.T) {
 	if ps := GetPendingSpend(8); ps == nil || ps.From != users[8] || QueueLen() != 1 {
 		t.Fatalf("after one head close: d-8=%+v queue=%d, want u8 issued and one left", ps, QueueLen())
 	}
+	// u8 waited, so it reserved the default fee cap; issuing it priced the fee
+	// and refunded the rest. An immediately issued one (u0) was debited the
+	// exact fee. Both end up paying amount + 21000 x 4 gwei.
+	ten := new(big.Int).Mul(big.NewInt(10), big.NewInt(1e18))
+	want := new(big.Int).Sub(ten, big.NewInt(10_000_000_000_000_000+21_000*4_000_000_000))
+	for _, u := range []string{users[0], users[8]} {
+		if got := GetBalance(u, "eth"); got.Cmp(want) != 0 {
+			t.Fatalf("%s balance %s, want %s", u, got, want)
+		}
+	}
 }
 
 // RP-11: a queued withdrawal can be taken back in full by its owner only;
@@ -118,8 +128,9 @@ func TestRP11_CancelQueuedRefundsTheOwnerInFull(t *testing.T) {
 	supplyBefore := GetSupply("eth")
 	head, _ := QueueBounds()
 	q := GetQueued(head)
-	if q == nil || q.From != last || head != 8 {
-		t.Fatalf("queue head seq %d = %+v, want seq 8 = %s's withdrawal", head, q, last)
+	// The first 8 were issued directly (no queue entry); u8's is the first queued.
+	if q == nil || q.From != last || head != 0 {
+		t.Fatalf("queue head seq %d = %+v, want seq 0 = %s's withdrawal", head, q, last)
 	}
 	as(t, "hive:u0", rpNow)
 	if err := HandleCancelQueuedWithdrawal(head); err == nil {

@@ -27,10 +27,17 @@ import (
 // vault is the vault the unmap handler was given (main passes vault(), the TSS
 // key's verified address; zero when there is none, and then nothing issues).
 func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (string, error) {
+	next := GetPendingNonce()
+	// Nothing waiting: issue now, without writing a queue entry that the same
+	// call would delete (a state write costs RC even when it is undone).
+	if QueueLen() == 0 {
+		if header := issuableNow(vault); header != nil && issueQueued(&q, vault, chainId, header) {
+			return "issued:" + strconv.FormatUint(next, 10), nil
+		}
+	}
 	if QueueLen() >= constants.MaxQueuedWithdrawals {
 		return "", ce.NewContractError(ce.ErrIntent, "withdrawal queue is full; try again later")
 	}
-	next := GetPendingNonce()
 	seq := Enqueue(q)
 	logQueued(seq, &q)
 	drainWith(chainId, vault)
@@ -53,16 +60,48 @@ func DrainWithdrawalQueue(chainId uint64) int {
 	return drainWith(chainId, vault)
 }
 
-// drainWith is DrainWithdrawalQueue against a given vault address.
-func drainWith(chainId uint64, vault [20]byte) int {
-	if vault == ([20]byte{}) || isPaused() || QueueLen() == 0 || InFlightWithdrawals() >= constants.MaxInFlightWithdrawals {
-		return 0
+// issuableNow is the pricing header to issue a withdrawal with now, or nil
+// when none can be issued (no vault, paused, MaxInFlightWithdrawals in flight,
+// no active TSS key, no fresh pricing header).
+func issuableNow(vault [20]byte) *blocklist.EthBlockHeader {
+	if vault == ([20]byte{}) || isPaused() || InFlightWithdrawals() >= constants.MaxInFlightWithdrawals {
+		return nil
 	}
 	if requireTssKey() != nil {
-		return 0
+		return nil
 	}
 	header, err := pricingHeader()
 	if err != nil {
+		return nil
+	}
+	return header
+}
+
+// immediateETHFee is what an ETH withdrawal of gas units is charged if it is
+// issued in this call (nothing queued and issuableNow), else nil. An unmap
+// then debits exactly this fee instead of its cap, so nothing is refunded.
+func immediateETHFee(gas uint64, vault [20]byte) *big.Int {
+	if QueueLen() != 0 {
+		return nil
+	}
+	header := issuableNow(vault)
+	if header == nil {
+		return nil
+	}
+	_, fee, err := safeGasFee(gas, header.BaseFeePerGas, 2, 2_000_000_000)
+	if err != nil {
+		return nil
+	}
+	return fee
+}
+
+// drainWith is DrainWithdrawalQueue against a given vault address.
+func drainWith(chainId uint64, vault [20]byte) int {
+	if QueueLen() == 0 {
+		return 0
+	}
+	header := issuableNow(vault)
+	if header == nil {
 		return 0
 	}
 	head, tail := QueueBounds()
@@ -132,7 +171,9 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		unsigned = BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value, gas)
 		ps.Amount = l1Value // the L1 tx value: returns to the vault on revert
 		ps.GasCost = feeWei // prepaid by the caller
-		ps.GasLimit = gas
+		if gas != constants.ETHTransferGas {
+			ps.GasLimit = gas // 0 (omitted) is ETHTransferGas: a smaller record
+		}
 	} else {
 		tokenAddr, terr := crypto.HexToAddress(q.TokenAddress)
 		if terr != nil {
