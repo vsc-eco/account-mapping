@@ -103,9 +103,11 @@ func drainWith(chainId uint64, vault [20]byte, max int) int {
 	if header == nil {
 		return 0
 	}
+	advanceQueueHead()
 	head, tail := QueueBounds()
 	issued, scanned := 0, uint64(0)
-	for seq := head; seq < tail && scanned < constants.MaxDrainScan && issued < max; seq++ {
+	// Bounded in slots read too (MaxQueueWalk), not only in live entries.
+	for seq := head; seq < tail && seq-head < constants.MaxQueueWalk && scanned < constants.MaxDrainScan && issued < max; seq++ {
 		if InFlightWithdrawals() >= constants.MaxInFlightWithdrawals {
 			break
 		}

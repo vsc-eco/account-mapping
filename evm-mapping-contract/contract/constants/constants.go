@@ -228,6 +228,10 @@ const MaxQueuedWithdrawals uint64 = 1024
 // of entries that cannot be issued yet (fee cap, reserve) stays cheap.
 const MaxDrainScan uint64 = 32
 
+// MaxQueueWalk bounds the queue slots one call reads, removed ones included
+// (advanceQueueHead, the drain scan).
+const MaxQueueWalk uint64 = 64
+
 // DefaultETHFeeCapFloorGwei is the smallest default fee authorization an ETH
 // unmap reserves when the caller sets no max_fee: its gas limit at 20 gwei
 // (420,000 gwei at 21,000 gas). The unused part is refunded when the

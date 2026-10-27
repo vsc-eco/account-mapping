@@ -325,3 +325,31 @@ func TestRP11_OnlyTheDrainIssuesQueuedWithdrawals(t *testing.T) {
 		t.Fatalf("drain max 8 issued %d (queue %d), want only u9's: 8 in flight", n, QueueLen())
 	}
 }
+
+// RP-11: a removal behind a long run of removed entries walks at most
+// MaxQueueWalk of them; later removals and drains walk on, and the queue
+// still empties. Old code walked every gap in the one call.
+func TestRP11_HeadWalkIsBounded(t *testing.T) {
+	rpBridge(t, big.NewInt(0), "hive:alice")
+	q := QueuedWithdrawal{From: "hive:alice", To: "0x00000000000000000000000000000000000000e2", Asset: "eth",
+		Amount: big.NewInt(1e16), Debit: big.NewInt(1e16), FeeCap: big.NewInt(1e15)}
+	for i := 0; i < 200; i++ {
+		Enqueue(q)
+	}
+	for seq := uint64(1); seq < 200; seq++ { // everything behind the head goes first
+		sdk.StateDeleteObject(queueKey(seq))
+	}
+	RemoveQueued(0)
+	if head, _ := QueueBounds(); head != constants.MaxQueueWalk {
+		t.Fatalf("head %d after one removal, want %d (bounded walk)", head, constants.MaxQueueWalk)
+	}
+	drainWith(1, [20]byte{1}, 1) // nothing to issue; walks on
+	if head, _ := QueueBounds(); head != 2*constants.MaxQueueWalk {
+		t.Fatalf("head %d after a drain, want %d", head, 2*constants.MaxQueueWalk)
+	}
+	drainWith(1, [20]byte{1}, 1)
+	drainWith(1, [20]byte{1}, 1)
+	if QueueLen() != 0 {
+		t.Fatalf("queue length %d after the walk finished, want 0", QueueLen())
+	}
+}

@@ -381,9 +381,22 @@ func GetQueued(seq uint64) *QueuedWithdrawal {
 // RemoveQueued deletes entry seq and advances the head past removed entries.
 func RemoveQueued(seq uint64) {
 	sdk.StateDeleteObject(queueKey(seq))
+	advanceQueueHead()
+}
+
+// advanceQueueHead moves the head past removed entries, at most
+// MaxQueueWalk of them per call. Entries behind a waiting head can be issued or
+// cancelled first, leaving gaps; walking all of them at once (up to
+// MaxQueuedWithdrawals reads) could push a call past its caller's rc_limit,
+// and the call that issues or cancels the head must not fail. Each later
+// removal or drain walks on.
+func advanceQueueHead() {
 	head, tail := QueueBounds()
-	for head < tail && GetQueued(head) == nil {
+	start := head
+	for n := uint64(0); head < tail && n < constants.MaxQueueWalk && GetQueued(head) == nil; n++ {
 		head++
 	}
-	sdk.StateSetObject(constants.WithdrawQueueHeadKey, strconv.FormatUint(head, 10))
+	if head != start {
+		sdk.StateSetObject(constants.WithdrawQueueHeadKey, strconv.FormatUint(head, 10))
+	}
 }
