@@ -108,7 +108,8 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	var unsigned []byte
 	userCost := new(big.Int)
 	if q.Asset == constants.NativeAsset {
-		gasFeeCap, feeWei, ferr := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, 2, gasTipCap)
+		gas := ETHGasLimit(q.GasLimit)
+		gasFeeCap, feeWei, ferr := safeGasFee(gas, header.BaseFeePerGas, 2, gasTipCap)
 		if ferr != nil || (q.FeeCap != nil && feeWei.Cmp(q.FeeCap) > 0) {
 			return false
 		}
@@ -128,9 +129,10 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 			}
 			userCost.Add(q.Amount, feeWei)
 		}
-		unsigned = BuildETHWithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value)
+		unsigned = BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value, gas)
 		ps.Amount = l1Value // the L1 tx value: returns to the vault on revert
 		ps.GasCost = feeWei // prepaid by the caller
+		ps.GasLimit = gas
 	} else {
 		tokenAddr, terr := crypto.HexToAddress(q.TokenAddress)
 		if terr != nil {
@@ -200,17 +202,17 @@ func logQueued(seq uint64, q *QueuedWithdrawal) {
 		"|d=" + q.Debit.String())
 }
 
-// defaultETHFeeCap is the fee authorization an ETH unmap reserves when the
-// caller sets no max_fee: twice the issue-time formula at the newest header's
-// base fee (2x base + 2 gwei tip), never below DefaultETHFeeCapFloor. The
-// unused part is refunded at issue.
-func defaultETHFeeCap() *big.Int {
-	floor := big.NewInt(constants.DefaultETHFeeCapFloor)
+// defaultETHFeeCap is the fee authorization an ETH unmap of gas units reserves
+// when the caller sets no max_fee: twice the issue-time formula at the newest
+// header's base fee (2x base + 2 gwei tip), never below gas x
+// DefaultETHFeeCapFloorGwei. The unused part is refunded at issue.
+func defaultETHFeeCap(gas uint64) *big.Int {
+	floor := new(big.Int).Mul(new(big.Int).SetUint64(gas), big.NewInt(constants.DefaultETHFeeCapFloorGwei*1_000_000_000))
 	header := blocklist.GetHeader(blocklist.GetLastHeight())
 	if header == nil {
 		return floor
 	}
-	_, fee, err := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, 4, 4_000_000_000)
+	_, fee, err := safeGasFee(gas, header.BaseFeePerGas, 4, 4_000_000_000)
 	if err != nil || fee.Cmp(floor) < 0 {
 		return floor
 	}

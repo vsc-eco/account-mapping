@@ -203,11 +203,15 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	feeCap, err := ethFeeCap(params.MaxFee)
+	gas, err := ethGasLimit(params.GasLimit)
 	if err != nil {
 		return "", err
 	}
-	if err := failFastOverCap(constants.ETHTransferGas, feeCap); err != nil {
+	feeCap, err := ethFeeCap(params.MaxFee, gas)
+	if err != nil {
+		return "", err
+	}
+	if err := failFastOverCap(gas, feeCap); err != nil {
 		return "", err
 	}
 	// The fee is priced when the withdrawal is issued (RP-11); the caller
@@ -241,15 +245,50 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		Debit:     userDebit,
 		FeeCap:    feeCap,
 		DeductFee: params.DeductFee,
+		GasLimit:  gas,
 	}, vaultAddress, chainId)
 }
 
+// errTokenGasLimit refuses gas_limit on a token withdrawal: its gas is paid
+// from the shared reserve, so it is the token's registered limit (USDC-GAS-1).
+var errTokenGasLimit = ce.NewContractError(ce.ErrInput, "gas_limit applies to ETH withdrawals; a token's L1 gas limit is set when it is registered")
+
+// ethGasLimit is an ETH unmap's L1 gas limit (GLAM-1): the caller's gas_limit,
+// else the owner-set default, else ETHTransferGas.
+func ethGasLimit(requested uint64) (uint64, error) {
+	if requested == 0 {
+		return defaultETHGasLimit(), nil
+	}
+	if requested < constants.ETHTransferGas || requested > constants.MaxETHGasLimit {
+		return 0, ce.NewContractError(ce.ErrInput, "gas_limit must be between "+
+			strconv.FormatUint(constants.ETHTransferGas, 10)+" and "+strconv.FormatUint(constants.MaxETHGasLimit, 10))
+	}
+	return requested, nil
+}
+
+// defaultETHGasLimit is the owner-set ETH withdrawal gas limit (setETHGasLimit),
+// else ETHTransferGas.
+func defaultETHGasLimit() uint64 {
+	if v := sdk.StateGetObject(constants.ETHGasLimitKey); v != nil && *v != "" {
+		if g, err := strconv.ParseUint(*v, 10, 64); err == nil && g >= constants.ETHTransferGas && g <= constants.MaxETHGasLimit {
+			return g
+		}
+	}
+	return constants.ETHTransferGas
+}
+
+// SetETHGasLimit sets the default ETH withdrawal gas limit (main.go validates).
+func SetETHGasLimit(gas uint64) {
+	sdk.StateSetObject(constants.ETHGasLimitKey, strconv.FormatUint(gas, 10))
+}
+
 // ethFeeCap is the ETH fee authorization for an unmap: the caller's max_fee,
-// else defaultETHFeeCap. HIGH #40: a negative max_fee is refused, and so is 0,
-// which could never pay an L1 fee and would only park the withdrawal.
-func ethFeeCap(maxFee string) (*big.Int, error) {
+// else defaultETHFeeCap at its gas limit. HIGH #40: a negative max_fee is
+// refused, and so is 0, which could never pay an L1 fee and would only park
+// the withdrawal.
+func ethFeeCap(maxFee string, gas uint64) (*big.Int, error) {
 	if maxFee == "" {
-		return defaultETHFeeCap(), nil
+		return defaultETHFeeCap(gas), nil
 	}
 	cap, ok := new(big.Int).SetString(maxFee, 10)
 	if !ok {
@@ -306,6 +345,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	}
 	if params.TokenAddress == "" {
 		return "", ce.NewContractError(ce.ErrInput, "token_address required for ERC-20 withdrawal")
+	}
+	if params.GasLimit != 0 {
+		return "", errTokenGasLimit
 	}
 	tokenAddr, err := crypto.HexToAddress(params.TokenAddress)
 	if err != nil {
@@ -1182,6 +1224,9 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		if params.TokenAddress == "" {
 			return ce.NewContractError(ce.ErrInput, "token_address required")
 		}
+		if params.GasLimit != 0 {
+			return errTokenGasLimit
+		}
 		tokenAddr, terr := crypto.HexToAddress(params.TokenAddress)
 		if terr != nil {
 			return ce.Prepend(terr, "token_address")
@@ -1215,11 +1260,15 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	} else {
 		// W4 Cluster C CRIT #7: the owner pays the L1 fee (amount + fee), never
 		// the vault. RP-4: no gas-reserve floor; the reserve is not touched.
-		feeCap, ferr := ethFeeCap(params.MaxFee)
+		gas, gerr := ethGasLimit(params.GasLimit)
+		if gerr != nil {
+			return gerr
+		}
+		feeCap, ferr := ethFeeCap(params.MaxFee, gas)
 		if ferr != nil {
 			return ferr
 		}
-		if ferr := failFastOverCap(constants.ETHTransferGas, feeCap); ferr != nil {
+		if ferr := failFastOverCap(gas, feeCap); ferr != nil {
 			return ferr
 		}
 		if params.DeductFee {
@@ -1229,7 +1278,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		} else {
 			userDebit.Add(amount, feeCap)
 		}
-		q.Asset, q.FeeCap, q.DeductFee = constants.NativeAsset, feeCap, params.DeductFee
+		q.Asset, q.FeeCap, q.DeductFee, q.GasLimit = constants.NativeAsset, feeCap, params.DeductFee, gas
 	}
 	if GetBalance(params.From, q.Asset).Cmp(userDebit) < 0 {
 		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
@@ -1385,7 +1434,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	var unsigned []byte
 	if ps.Asset == "eth" {
 		// big.Int/wei: ps.Amount is already wei.
-		unsigned = BuildETHWithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, toAddr, ps.Amount)
+		unsigned = BuildETHWithdrawalTxGas(chainId, confirmedNonce, gasTipCap, gasFeeCap, toAddr, ps.Amount, ps.GasLimit)
 	} else {
 		tokenAddr, terr := crypto.HexToAddress(ps.TokenAddress)
 		if terr != nil {

@@ -218,3 +218,63 @@ func TestRP11_QueueRefusesOnlyWhenFull(t *testing.T) {
 		t.Fatalf("unmap with a full queue: %v, want the full refusal", err)
 	}
 }
+
+// GLAM-1: an ETH withdrawal is signed with its own L1 gas limit (the caller's
+// gas_limit, else the owner-set default) and priced for it, so a transfer that
+// creates its recipient under Glamsterdam's state-creation pricing (~207k gas on
+// Sepolia) does not run out of gas. Old code: always 21,000.
+func TestGLAM1_ETHWithdrawalCarriesItsGasLimit(t *testing.T) {
+	rpBridge(t, big.NewInt(0), "hive:alice")
+	as(t, "hive:alice", rpNow)
+	if _, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: "0x00000000000000000000000000000000000000e2", Asset: "eth", GasLimit: 207_391}, [20]byte{1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	ps := GetPendingSpend(0)
+	if ps == nil || ps.GasLimit != 207_391 {
+		t.Fatalf("pending spend %+v, want gas limit 207391", ps)
+	}
+	if want := big.NewInt(207_391 * 4_000_000_000); ps.GasCost.Cmp(want) != 0 {
+		t.Fatalf("fee %s, want 207391 x 4 gwei = %s", ps.GasCost, want)
+	}
+	if !strings.Contains(ps.UnsignedTxHex, "83032a1f") { // RLP of 207391 = 0x83 0x03 0x2a 0x1f
+		t.Fatalf("unsigned tx %s does not carry gas 207391", ps.UnsignedTxHex)
+	}
+
+	// The owner-set default applies when the caller sets none.
+	SetETHGasLimit(250_000)
+	as(t, "hive:alice", rpNow)
+	if _, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: "0x00000000000000000000000000000000000000e2", Asset: "eth"}, [20]byte{1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if ps := GetPendingSpend(1); ps == nil || ps.GasLimit != 250_000 || !strings.Contains(ps.UnsignedTxHex, "8303d090") {
+		t.Fatalf("default gas: %+v, want 250000", ps)
+	}
+
+	// Out of range is refused; so is gas_limit on a token withdrawal (its gas
+	// is reserve-paid, set at registration).
+	for _, g := range []uint64{20_999, constants.MaxETHGasLimit + 1} {
+		as(t, "hive:alice", rpNow)
+		if _, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: "0x00000000000000000000000000000000000000e2", Asset: "eth", GasLimit: g}, [20]byte{1}, 1); err == nil || !strings.Contains(err.Error(), "gas_limit must be between") {
+			t.Fatalf("gas_limit %d: %v, want refused", g, err)
+		}
+	}
+	as(t, "hive:alice", rpNow)
+	if _, err := HandleUnmapERC20(&TransferParams{Amount: "1000", To: "0x00000000000000000000000000000000000000e2", Asset: "USDC", TokenAddress: "0x00000000000000000000000000000000000000c0", GasLimit: 90_000}, [20]byte{1}, 1); err == nil || !strings.Contains(err.Error(), "gas_limit applies to ETH") {
+		t.Fatalf("unmapERC20 with gas_limit: %v, want refused", err)
+	}
+}
+
+// GLAM-1: a fee bump re-signs the withdrawal with the gas limit it was signed with.
+func TestGLAM1_ReplaceKeepsTheGasLimit(t *testing.T) {
+	rpBridge(t, big.NewInt(0), "hive:alice")
+	as(t, "hive:alice", rpNow)
+	if _, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: "0x00000000000000000000000000000000000000e2", Asset: "eth", GasLimit: 207_391}, [20]byte{1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := HandleReplaceWithdrawal([20]byte{1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if ps := GetPendingSpend(0); ps == nil || !strings.Contains(ps.UnsignedTxHex, "83032a1f") {
+		t.Fatalf("replaced tx %v does not carry gas 207391", ps)
+	}
+}

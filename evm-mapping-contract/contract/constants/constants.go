@@ -142,6 +142,16 @@ const MaxTokenSymbolLen = 32
 const ETHTransferGas = uint64(21_000)
 const ERC20TransferGas = uint64(65_000)
 
+// GLAM-1: the L1 gas limit of an ETH withdrawal. 21,000 pays a transfer to an
+// account that exists. Under Glamsterdam's state-creation pricing (EIP-8037,
+// live on Sepolia since 2026-10-06, mainnet date not set) a transfer that
+// creates its recipient costs far more (eth_estimateGas on Sepolia: 207,391),
+// so at 21,000 it reverts and the fee is lost. An unmap may set gas_limit;
+// otherwise the owner-set default (ETHGasLimitKey, setETHGasLimit) applies,
+// else ETHTransferGas. Self-sends to the vault (drop/roll) stay at 21,000.
+const MaxETHGasLimit uint64 = 1_000_000
+const ETHGasLimitKey = "egl"
+
 // Minimum withdrawal amounts (in token-native units).
 // big.Int/wei migration: native ETH accounting is now full wei (18 decimals),
 // no gwei scaling. These thresholds are bounded config values (well within
@@ -218,10 +228,11 @@ const MaxQueuedWithdrawals uint64 = 1024
 // of entries that cannot be issued yet (fee cap, reserve) stays cheap.
 const MaxDrainScan uint64 = 32
 
-// DefaultETHFeeCapFloor is the smallest default fee authorization an ETH unmap
-// reserves when the caller sets no max_fee: ETHTransferGas at 20 gwei. The
-// unused part is refunded when the withdrawal is priced and issued.
-const DefaultETHFeeCapFloor = int64(420_000_000_000_000) // 21,000 x 20 gwei
+// DefaultETHFeeCapFloorGwei is the smallest default fee authorization an ETH
+// unmap reserves when the caller sets no max_fee: its gas limit at 20 gwei
+// (420,000 gwei at 21,000 gas). The unused part is refunded when the
+// withdrawal is priced and issued.
+const DefaultETHFeeCapFloorGwei = int64(20)
 
 // USDC-GAS-1: per-token gas limit bounds for registerToken (0 = ERC20TransferGas).
 const (

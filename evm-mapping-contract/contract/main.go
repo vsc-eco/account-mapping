@@ -605,6 +605,22 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: "+err.Error()))
 		}
 
+	case "setETHGasLimit":
+		// GLAM-1: the default L1 gas limit of an ETH withdrawal (an unmap may
+		// set its own). Raise it when the chain prices account creation higher
+		// (Glamsterdam, EIP-8037); a pending withdrawal keeps the limit it was
+		// signed with.
+		var p struct {
+			GasLimit uint64 `json:"gas_limit"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setETHGasLimit: bad payload"))
+		}
+		if p.GasLimit < constants.ETHTransferGas || p.GasLimit > constants.MaxETHGasLimit {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setETHGasLimit: gas_limit out of range"))
+		}
+		mapping.SetETHGasLimit(p.GasLimit)
+
 	case "registerRouter":
 		assertNotPaused()
 		// MED-23 (M18-D22): reject an empty router id. routeDeposit treats an

@@ -25,6 +25,9 @@ type TransferParams struct {
 	TokenAddress string `json:"token_address"`
 	DeductFee    bool   `json:"deduct_fee"`
 	MaxFee       string `json:"max_fee"`
+	// GLAM-1: an ETH withdrawal's L1 gas limit (0 = the owner-set default).
+	// Within ETHTransferGas..MaxETHGasLimit. A token's is set at registration.
+	GasLimit uint64 `json:"gas_limit"`
 }
 
 type AllowanceParams struct {

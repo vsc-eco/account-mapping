@@ -96,8 +96,9 @@ type PendingSpend struct {
 	// RevertFee (USDC-1 B, ERC-20) is kept from the refund if the L1 transfer
 	// mines and reverts; snapshotted from the token registry at request time.
 	RevertFee *big.Int `json:"revert_fee,omitempty"`
-	// GasLimit (USDC-GAS-1, ERC-20) is the L1 gas limit the transfer was
-	// signed with (0 = ERC20TransferGas); replaceWithdrawal reuses it.
+	// GasLimit is the L1 gas limit the withdrawal was signed with (USDC-GAS-1
+	// for a token, GLAM-1 for ETH; 0 = ERC20TransferGas / ETHTransferGas);
+	// replaceWithdrawal reuses it.
 	GasLimit uint64 `json:"gas_limit,omitempty"`
 }
 
@@ -145,9 +146,24 @@ func DeletePendingSpend(nonce uint64) {
 	sdk.StateDeleteObject(key)
 }
 
-// BuildETHWithdrawalTx constructs an EIP-1559 transaction for native ETH withdrawal.
+// BuildETHWithdrawalTx constructs an EIP-1559 transaction for native ETH
+// withdrawal at 21,000 gas (the vault's self-sends use it as is).
 func BuildETHWithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap uint64, to [20]byte, amount *big.Int) []byte {
-	return buildEIP1559Tx(chainId, nonce, gasTipCap, gasFeeCap, constants.ETHTransferGas, to, amount, nil)
+	return BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, to, amount, 0)
+}
+
+// BuildETHWithdrawalTxGas is BuildETHWithdrawalTx with the withdrawal's gas
+// limit (GLAM-1); 0 means ETHTransferGas.
+func BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap uint64, to [20]byte, amount *big.Int, gas uint64) []byte {
+	return buildEIP1559Tx(chainId, nonce, gasTipCap, gasFeeCap, ETHGasLimit(gas), to, amount, nil)
+}
+
+// ETHGasLimit is the effective L1 gas limit for an ETH withdrawal.
+func ETHGasLimit(gas uint64) uint64 {
+	if gas == 0 {
+		return constants.ETHTransferGas
+	}
+	return gas
 }
 
 // BuildERC20WithdrawalTx constructs an EIP-1559 transaction calling ERC-20 transfer.
