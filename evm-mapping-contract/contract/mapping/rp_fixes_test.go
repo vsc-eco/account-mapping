@@ -94,7 +94,7 @@ func TestRP11_ManyUsersWithdrawAtOnceNoneRefused(t *testing.T) {
 	// The head closes (as confirmSpend does): the next queued issues.
 	DeletePendingSpend(0)
 	SetConfirmedNonce(1)
-	drainWith(1, [20]byte{1})
+	drainWith(1, [20]byte{1}, 8)
 	if ps := GetPendingSpend(8); ps == nil || ps.From != users[8] || QueueLen() != 1 {
 		t.Fatalf("after one head close: d-8=%+v queue=%d, want u8 issued and one left", ps, QueueLen())
 	}
@@ -287,5 +287,41 @@ func TestGLAM1_ReplaceKeepsTheGasLimit(t *testing.T) {
 	}
 	if ps := GetPendingSpend(0); ps == nil || !strings.Contains(ps.UnsignedTxHex, "83032a1f") {
 		t.Fatalf("replaced tx %v does not carry gas 207391", ps)
+	}
+}
+
+// RP-11: only drainWithdrawalQueue issues a queued withdrawal, at most max per
+// call. An unmap behind a queue joins it even with a slot free (FIFO, and its
+// caller never pays to issue other users' withdrawals); a head close (as
+// confirmSpend) issues nothing, so its RC cost stays fixed.
+func TestRP11_OnlyTheDrainIssuesQueuedWithdrawals(t *testing.T) {
+	var users []string
+	for i := 0; i < 10; i++ {
+		users = append(users, "hive:u"+strconv.Itoa(i))
+	}
+	rpBridge(t, big.NewInt(0), users...)
+	for _, u := range users {
+		if _, err := ethUnmap(t, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two head closes free two slots; nothing issues by itself.
+	for n := uint64(0); n < 2; n++ {
+		DeletePendingSpend(n)
+		SetConfirmedNonce(n + 1)
+	}
+	as(t, "hive:u0", rpNow)
+	st, err := ethUnmap(t, "hive:u0")
+	if err != nil || !strings.HasPrefix(st, "queued:") {
+		t.Fatalf("an unmap behind a queue with free slots: %q %v, want queued", st, err)
+	}
+	if QueueLen() != 3 || InFlightWithdrawals() != 6 {
+		t.Fatalf("queue %d in flight %d, want 3 queued and 6 in flight", QueueLen(), InFlightWithdrawals())
+	}
+	if n := drainWith(1, [20]byte{1}, 1); n != 1 || GetPendingSpend(8) == nil || GetPendingSpend(8).From != users[8] {
+		t.Fatalf("drain max 1 issued %d, d-8 %+v; want u8's", n, GetPendingSpend(8))
+	}
+	if n := drainWith(1, [20]byte{1}, 8); n != 1 || GetPendingSpend(9) == nil || GetPendingSpend(9).From != users[9] || QueueLen() != 1 {
+		t.Fatalf("drain max 8 issued %d (queue %d), want only u9's: 8 in flight", n, QueueLen())
 	}
 }

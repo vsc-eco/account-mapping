@@ -533,7 +533,6 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		SetConfirmedNonce(confirmedNonce + 1)
 		sdk.Log("withdrawal_lifecycle " + `{"action":"rolledBack","nonce":` + strconv.FormatUint(confirmedNonce, 10) +
 			`,"from":"` + ps.From + `","amount":"` + ps.Amount.String() + `","asset":"` + ps.Asset + `"}`)
-		DrainWithdrawalQueue(chainId)
 		return nil
 	}
 
@@ -652,7 +651,6 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		SetConfirmedNonce(confirmedNonce + 1)
 	}
 
-	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1199,6 +1197,24 @@ func deductGasReserve(amount *big.Int) {
 }
 
 func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64) error {
+	_, err := HandleUnmapFromStatus(params, vaultAddress, chainId)
+	return err
+}
+
+// HandleUnmapFromStatus is HandleUnmapFrom returning the withdrawal's status,
+// as unmapETH / unmapERC20 do: "issued:{nonce}" or "queued:{seq}" (the seq
+// cancelQueuedWithdrawal takes).
+func HandleUnmapFromStatus(params *TransferParams, vaultAddress [20]byte, chainId uint64) (status string, err error) {
+	defer func() {
+		if err != nil {
+			status = ""
+		}
+	}()
+	err = unmapFrom(params, vaultAddress, chainId, &status)
+	return status, err
+}
+
+func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, status *string) error {
 	if isPaused() {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
@@ -1307,7 +1323,7 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	SetAllowance(params.From, caller, q.Asset, new(big.Int).Sub(allowance, userDebit))
 	TrackWithdrawal(q.Asset, userDebit)
 	q.Debit = userDebit
-	_, err = submitWithdrawal(q, vaultAddress, chainId)
+	*status, err = submitWithdrawal(q, vaultAddress, chainId)
 	return err
 }
 
@@ -1559,7 +1575,6 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 			10,
 		) + `,"from":"` + ps.From + `","proof_type":"` + proof.Type + `"}`,
 	)
-	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1633,7 +1648,6 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 			10,
 		) + `,"from":"` + ps.From + `","caller":"` + caller + `","proof_type":"` + proof.Type + `"}`,
 	)
-	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1689,7 +1703,6 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 			10,
 		) + `,"from":"` + ps.From + `","proof_type":"` + proof.Type + `"}`,
 	)
-	DrainWithdrawalQueue(chainId)
 	return nil
 }
 

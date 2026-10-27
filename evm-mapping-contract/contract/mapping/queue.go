@@ -13,14 +13,17 @@ import (
 )
 
 // RP-11: a withdrawal request is validated and debited by the unmap handlers,
-// then submitted here. It is issued (priced, given the next vault nonce,
-// TSS-signed) as soon as fewer than MaxInFlightWithdrawals are in flight and a
-// fresh pricing header exists; otherwise it waits in the L2 queue. Nothing about
-// another user's withdrawal can make a request fail.
+// then submitted here. With nothing queued, fewer than MaxInFlightWithdrawals
+// in flight and a fresh pricing header, it is issued (priced, given the next
+// vault nonce, TSS-signed) in the same call; otherwise it waits in the L2
+// queue. Nothing about another user's withdrawal can make a request fail.
 //
-// Issuing happens on every head close (confirmSpend, expireWithdrawal,
-// cancelMyWithdrawal, clearNonce) and through the permissionless
-// drainWithdrawalQueue, which the bot calls after a proof brings a fresh header.
+// Queued withdrawals are issued only by the permissionless
+// drainWithdrawalQueue (the bot calls it whenever the queue is non-empty and a
+// slot is free). Never by an unmap, confirmSpend or an escape hatch: each issue
+// costs ~10-12k RC on the node's runtime, and a call that issued other users'
+// withdrawals could exceed its caller's rc_limit and fail (a confirmSpend
+// failing that way would stall the queue head).
 
 // submitWithdrawal queues q and drains. It returns "issued:{nonce}" when q went
 // straight into flight, else "queued:{seq}".
@@ -40,24 +43,20 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 	}
 	seq := Enqueue(q)
 	logQueued(seq, &q)
-	drainWith(chainId, vault)
-	if GetQueued(seq) == nil {
-		return "issued:" + strconv.FormatUint(next, 10), nil
-	}
 	return "queued:" + strconv.FormatUint(seq, 10), nil
 }
 
-// DrainWithdrawalQueue moves queued withdrawals into flight, oldest first, while
-// fewer than MaxInFlightWithdrawals are in flight. It never fails the calling
-// transaction: when it cannot issue (paused, no active TSS key or verified
-// vault, stale pricing header, an entry's fee cap or the gas reserve too low
-// at the current price) the entries stay queued and it returns.
-func DrainWithdrawalQueue(chainId uint64) int {
+// DrainWithdrawalQueue moves up to max queued withdrawals into flight, oldest
+// first, while fewer than MaxInFlightWithdrawals are in flight. It never fails
+// the calling transaction: when it cannot issue (paused, no active TSS key or
+// verified vault, stale pricing header, an entry's fee cap or the gas reserve
+// too low at the current price) the entries stay queued and it returns.
+func DrainWithdrawalQueue(chainId uint64, max int) int {
 	vault, ok := TssVaultAddress()
 	if !ok {
 		return 0
 	}
-	return drainWith(chainId, vault)
+	return drainWith(chainId, vault, max)
 }
 
 // issuableNow is the pricing header to issue a withdrawal with now, or nil
@@ -96,7 +95,7 @@ func immediateETHFee(gas uint64, vault [20]byte) *big.Int {
 }
 
 // drainWith is DrainWithdrawalQueue against a given vault address.
-func drainWith(chainId uint64, vault [20]byte) int {
+func drainWith(chainId uint64, vault [20]byte, max int) int {
 	if QueueLen() == 0 {
 		return 0
 	}
@@ -106,7 +105,7 @@ func drainWith(chainId uint64, vault [20]byte) int {
 	}
 	head, tail := QueueBounds()
 	issued, scanned := 0, uint64(0)
-	for seq := head; seq < tail && scanned < constants.MaxDrainScan; seq++ {
+	for seq := head; seq < tail && scanned < constants.MaxDrainScan && issued < max; seq++ {
 		if InFlightWithdrawals() >= constants.MaxInFlightWithdrawals {
 			break
 		}

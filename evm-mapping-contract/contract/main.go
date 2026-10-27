@@ -188,30 +188,47 @@ func mapDeposit(input *string) *string {
 func unmapETH(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if _, err := mapping.HandleUnmapETH(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapETH(&params, vault(), chainId())
+	if err != nil {
 		ce.CustomAbort(err)
 	}
-	return nil
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if _, err := mapping.HandleUnmapERC20(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapERC20(&params, vault(), chainId())
+	if err != nil {
 		ce.CustomAbort(err)
 	}
-	return nil
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
-// RP-11: move queued withdrawals into flight now (permissionless; the bot
-// calls it after a proof brings a fresh pricing header). Never fails: when
-// nothing can be issued it is a no-op.
+// RP-11: move queued withdrawals into flight now. Permissionless: the bot calls
+// it whenever the queue is non-empty and a slot is free (after a confirm, after
+// a proof brings a fresh pricing header); anyone may. Only this call issues
+// queued withdrawals. Never fails: when nothing can be issued it is a no-op.
 //
 //go:wasmexport drainWithdrawalQueue
 func drainWithdrawalQueue(input *string) *string {
-	mapping.DrainWithdrawalQueue(chainId())
-	return nil
+	// max: how many to issue in this call (default 1, at most
+	// MaxInFlightWithdrawals). Each issue costs ~10-12k RC; set rc_limit to match.
+	var p struct {
+		Max int `json:"max"`
+	}
+	if input != nil && *input != "" {
+		unmarshalParams(input, &p)
+	}
+	if p.Max <= 0 {
+		p.Max = 1
+	}
+	if p.Max > int(constants.MaxInFlightWithdrawals) {
+		p.Max = int(constants.MaxInFlightWithdrawals)
+	}
+	out := strconv.Itoa(mapping.DrainWithdrawalQueue(chainId(), p.Max))
+	return &out // how many were issued
 }
 
 // RP-11: the owner of a queued (not yet issued) withdrawal takes it back.
@@ -272,10 +289,11 @@ func approve(input *string) *string {
 func unmapFrom(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if err := mapping.HandleUnmapFrom(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapFromStatus(&params, vault(), chainId())
+	if err != nil {
 		ce.CustomAbort(err)
 	}
-	return nil
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
 //go:wasmexport increaseAllowance

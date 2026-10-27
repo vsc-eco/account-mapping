@@ -112,7 +112,7 @@ func TestLOW10_StaleHeaderQueuesInsteadOfPricing(t *testing.T) {
 // E23 attestation, so TssVaultAddress has none).
 func DrainWithdrawalQueue1(t *testing.T, vault [20]byte) {
 	t.Helper()
-	drainWith(1, vault)
+	drainWith(1, vault, 8)
 }
 
 // feeCapRLP is the RLP encoding of a gasFeeCap value, to find it in an
