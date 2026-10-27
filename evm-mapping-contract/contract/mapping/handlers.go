@@ -67,16 +67,15 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 
 	switch req.DepositType {
 	case "eth":
-		// W4 Cluster C CRIT #8 (v1 relayer whitelist): native ETH has no
-		// cryptographic depositor-to-L1 binding (the L1 tx sender is not
-		// the L2 caller). Gate the path on a registered relayer so a
-		// rogue L2 caller cannot route someone else's deposit. ERC-20
-		// path stays permissionless because the Transfer-log proof binds
-		// the depositor.
-		caller := sdk.GetEnv().Caller.String()
-		if !IsWhitelistedRelayer(caller) {
-			return ce.NewContractError(ce.ErrAuth, "native ETH deposit: caller is not a whitelisted relayer")
-		}
+		// RP-8: mapping a native ETH deposit is permissionless, like ERC-20.
+		// The CRIT #8 relayer whitelist guarded relayer-supplied routing; that
+		// channel is gone (review6 follow-up below): the credited identity,
+		// amount and instructions all come from the PROVEN, depositor-signed
+		// L1 tx, and the observed list stops a replay. What a mapper still
+		// chooses is only WHEN the map lands, which matters for a swap, so
+		// routeDeposit honours a swap only with the depositor's
+		// min_amount_out. Anyone can now map a stuck deposit; no single
+		// relayer is a liveness dependency.
 		// W4 Cluster B CRIT #6 Site 1: chainId passed in so VerifyETHDeposit
 		// can reject wrong-chain txs before any state mutation. calldata is the
 		// PROVEN L1 tx data field — the depositor-signed routing-intent channel.
@@ -182,10 +181,6 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
-	if HasPendingWithdrawal() {
-		return "", ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
-	}
-
 	env := sdk.GetEnv()
 	if err := checkAuth(env); err != nil {
 		return "", err
@@ -199,131 +194,106 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if amount.Cmp(big.NewInt(constants.MinETHWithdrawal)) < 0 {
 		return "", ce.NewContractError(ce.ErrIntent, "below minimum ETH withdrawal")
 	}
-
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
 		return "", ce.Prepend(err, "'to' address")
 	}
 	// review2 #44: the zero address parses as a valid [20]byte; a
 	// TSS-signed withdrawal to 0x000…0 burns the funds irrecoverably.
-	// (Also review6 closure T2-14 / M70 — same finding, single guard suffices.)
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-
-	header, herr := pricingHeader()
-	if herr != nil {
-		return "", herr
-	}
-
-	gasReserve := getGasReserve()
-	if gasReserve.Cmp(big.NewInt(constants.MinGasReserve)) < 0 {
-		return "", ce.NewContractError(ce.ErrBalance, "insufficient gas reserve")
-	}
-
-	gasTipCap := uint64(2_000_000_000) // 2 gwei
-	// review2 HIGH #16: checked arithmetic — a negative (wrapped) fee here
-	// inflated the user's balance instead of debiting it. The fee is now a
-	// *big.Int in WEI, so it composes directly with the wei balance.
-	// (Supersedes review6 L1/X3: big.Int fee math cannot overflow, so the
-	// int64 SafeMul path the audit called for is unnecessary on this base.)
-	gasFeeCap, feeWei, feeErr := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, 2, gasTipCap)
-	if feeErr != nil {
-		return "", ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
-	}
-
-	if params.MaxFee != "" {
-		maxFee, mok := new(big.Int).SetString(params.MaxFee, 10)
-		if !mok {
-			return "", ce.NewContractError(ce.ErrInput, "invalid max_fee")
-		}
-		// HIGH #40: reject negative max_fee instead of silently disabling the cap.
-		if maxFee.Sign() < 0 {
-			return "", ce.NewContractError(ce.ErrInput, "max_fee must be non-negative")
-		}
-		// HIGH #40: maxFee=0 must mean "no fees accepted" — a zero cap rejects
-		// any positive computed fee. maxFee and the fee are both WEI.
-		if feeWei.Cmp(maxFee) > 0 {
-			return "", ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
-		}
-	}
-
-	// big.Int/wei: the fee is full wei, same denomination as amount/balance.
-	fee := feeWei
-
-	// l1Value is what the signed L1 tx sends; userDebit is what the caller
-	// pays on Magi. Uniform invariant either way: userDebit == l1Value + fee.
-	//   DeductFee=false (fee on top):  l1Value = amount,       userDebit = amount + fee
-	//   DeductFee=true  (fee netted):  l1Value = amount - fee, userDebit = amount
-	// This makes every downstream path mode-agnostic: a reverted L1 tx
-	// returns l1Value to the vault (refund ps.Amount); a proven-dropped tx
-	// spent nothing (refund ps.Amount + ps.GasCost).
-	l1Value := new(big.Int).Set(amount)
-	userDebit := new(big.Int).Set(amount)
-	if params.DeductFee {
-		l1Value.Sub(l1Value, fee)
-		if l1Value.Sign() <= 0 {
-			return "", ce.NewContractError(ce.ErrIntent, "amount does not cover the L1 fee")
-		}
-	} else {
-		userDebit.Add(amount, fee)
-	}
-
-	// Check balance BEFORE signing to prevent signed TX leak on insufficient funds.
-	if GetBalance(caller, "eth").Cmp(userDebit) < 0 {
-		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
-	}
-
-	nonce := GetPendingNonce()
-	unsigned := BuildETHWithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value)
-	sighash := ComputeSighash(unsigned)
-
-	if err := requireTssKey(); err != nil {
+	feeCap, err := ethFeeCap(params.MaxFee)
+	if err != nil {
 		return "", err
 	}
-	sdk.TssSignKey("primary", sighash)
-
-	if !DecBalance(caller, "eth", userDebit) {
+	if err := failFastOverCap(constants.ETHTransferGas, feeCap); err != nil {
+		return "", err
+	}
+	// The fee is priced when the withdrawal is issued (RP-11); the caller
+	// authorizes up to feeCap and gets the unused part back at issue.
+	//   fee on top:   debit = amount + feeCap, L1 value = amount
+	//   DeductFee:    debit = amount,          L1 value = amount - fee
+	// RP-4: no gas-reserve floor here. The caller pays this transfer's gas;
+	// the reserve is not touched, so it must not gate ETH withdrawals.
+	userDebit := new(big.Int).Set(amount)
+	if params.DeductFee {
+		if amount.Cmp(feeCap) <= 0 {
+			return "", ce.NewContractError(ce.ErrIntent, "amount does not cover the L1 fee cap")
+		}
+	} else {
+		userDebit.Add(amount, feeCap)
+	}
+	if GetBalance(caller, constants.NativeAsset).Cmp(userDebit) < 0 {
 		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
-	// Custody accounting: the vault will pay out l1Value + gas ≈ userDebit
-	// (gas estimated at the fee upper bound), all charged to the caller.
-	// Active and User both shrink by the full debit; the L1 fee is real
-	// custody outflow, not a Magi fee, so Supply.Fee is untouched.
-	// (MED-133 corrupt-supply abort is enforced inside GetSupply now.)
-	TrackWithdrawal("eth", userDebit)
-
-	// W4 Cluster F D-F-3: snapshot CURRENT vault into VaultAtQueue. When
-	// confirmSpend lands, HandleConfirmSpend ecrecovers against this
-	// snapshot (NOT current vault) — a vault change (TSS key rotation)
-	// between unmap and confirmSpend no longer orphans the pending
-	// withdrawal (HIGH #29).
-	ps := PendingSpend{
-		Nonce:         nonce,
-		Amount:        l1Value, // the L1 tx value — returns to the vault on revert
-		From:          caller,
-		To:            params.To,
-		Asset:         "eth",
-		UnsignedTxHex: hex.EncodeToString(unsigned),
-		BlockHeight:   blocklist.GetLastHeight(),
-		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
-		GasCost:       fee, // prepaid L1 fee — refunded with Amount if the tx is proven dropped
+	if !DecBalance(caller, constants.NativeAsset, userDebit) {
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
-	StorePendingSpend(ps)
-	logUnmap(ps, userDebit, true)
-	SetPendingNonce(nonce + 1)
+	// Custody and user supply shrink by the full debit now; the unused fee
+	// authorization is booked back at issue, a cancel books back all of it.
+	TrackWithdrawal(constants.NativeAsset, userDebit)
+	return submitWithdrawal(QueuedWithdrawal{
+		From:      caller,
+		To:        params.To,
+		Asset:     constants.NativeAsset,
+		Amount:    amount,
+		Debit:     userDebit,
+		FeeCap:    feeCap,
+		DeductFee: params.DeductFee,
+	}, vaultAddress, chainId)
+}
 
-	return hex.EncodeToString(unsigned), nil
+// ethFeeCap is the ETH fee authorization for an unmap: the caller's max_fee,
+// else defaultETHFeeCap. HIGH #40: a negative max_fee is refused, and so is 0,
+// which could never pay an L1 fee and would only park the withdrawal.
+func ethFeeCap(maxFee string) (*big.Int, error) {
+	if maxFee == "" {
+		return defaultETHFeeCap(), nil
+	}
+	cap, ok := new(big.Int).SetString(maxFee, 10)
+	if !ok {
+		return nil, ce.NewContractError(ce.ErrInput, "invalid max_fee")
+	}
+	if cap.Sign() <= 0 {
+		return nil, ce.NewContractError(ce.ErrInput, "max_fee must be positive")
+	}
+	return cap, nil
+}
+
+// failFastOverCap refuses a request whose fee cap is already below the fee at a
+// FRESH price (HIGH #40: the caller learns now, instead of the withdrawal
+// waiting in the queue). With no fresh price the check is left to issue time.
+func failFastOverCap(gasUnits uint64, cap *big.Int) error {
+	header, err := pricingHeader()
+	if err != nil {
+		return nil
+	}
+	if _, fee, ferr := safeGasFee(gasUnits, header.BaseFeePerGas, 2, 2_000_000_000); ferr == nil && fee.Cmp(cap) > 0 {
+		return ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
+	}
+	return nil
+}
+
+// optionalMaxFee parses an ERC-20 caller's cap on the reserve-paid gas.
+func optionalMaxFee(maxFee string) (*big.Int, error) {
+	if maxFee == "" {
+		return nil, nil
+	}
+	cap, ok := new(big.Int).SetString(maxFee, 10)
+	if !ok {
+		return nil, ce.NewContractError(ce.ErrInput, "invalid max_fee")
+	}
+	if cap.Sign() <= 0 {
+		return nil, ce.NewContractError(ce.ErrInput, "max_fee must be positive")
+	}
+	return cap, nil
 }
 
 func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
-	if HasPendingWithdrawal() {
-		return "", ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
-	}
-
 	env := sdk.GetEnv()
 	if err := checkAuth(env); err != nil {
 		return "", err
@@ -349,103 +319,41 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 {
 		return "", ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
 	}
-
 	recipientAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
 		return "", ce.Prepend(err, "recipient address")
 	}
 	// review2 #44: refuse the zero address (TSS-signed burn).
-	// (Also review6 closure T2-14 / M70 — same finding, single guard suffices.)
 	if recipientAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-
-	header, herr := pricingHeader()
-	if herr != nil {
-		return "", herr
-	}
-
-	gasReserve := getGasReserve()
-	if gasReserve.Cmp(big.NewInt(constants.MinGasReserve)) < 0 {
-		return "", ce.NewContractError(ce.ErrBalance, "insufficient gas reserve for ERC-20 withdrawal")
-	}
-
-	gasTipCap := uint64(2_000_000_000)
-	// review2 HIGH #16: checked arithmetic (see safeGasFee); gasCost is *big.Int WEI.
-	// (Supersedes review6 L1/X3 — big.Int gas math cannot overflow.)
-	gasFeeCap, gasCost, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, 2, gasTipCap)
-	if feeErr != nil {
-		return "", ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
-	}
-	// MED-83 (M30-Scenario-5), ported to develop's wei model: enforce MaxFee on
-	// the ERC-20 path too. Pre-fix only HandleUnmapETH honored MaxFee, so at a
-	// baseFee spike the contract would deduct an unbounded gas cost from the
-	// reserve regardless of the caller's stated cap. gasCost is already WEI here
-	// (safeGasFee), the same denomination as MaxFee — mirror HandleUnmapETH.
-	if params.MaxFee != "" {
-		maxFee, mok := new(big.Int).SetString(params.MaxFee, 10)
-		if !mok {
-			return "", ce.NewContractError(ce.ErrInput, "invalid max_fee")
-		}
-		if maxFee.Sign() < 0 {
-			return "", ce.NewContractError(ce.ErrInput, "max_fee must be non-negative")
-		}
-		if gasCost.Cmp(maxFee) > 0 {
-			return "", ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
-		}
-	}
-
-	// RV-6 (RV re-verify): the ERC-20 gas is paid out of the shared ETH reserve.
-	// The MinGasReserve floor above is NOT enough — at a high base fee the gas
-	// estimate can exceed the whole reserve, and the pre-fix deductGasReserve
-	// clamped to 0 while Active("eth") was still debited the full estimate,
-	// silently spending user-owned ETH and under-collateralizing the vault.
-	// Require the reserve to actually cover this withdrawal's gas before signing.
-	if getGasReserve().Cmp(gasCost) < 0 {
-		return "", ce.NewContractError(ce.ErrBalance, "gas reserve cannot cover this withdrawal's L1 gas at the current base fee")
-	}
-
-	nonce := GetPendingNonce()
-	unsigned := BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, recipientAddr, amount)
-	sighash := ComputeSighash(unsigned)
-
-	if err := requireTssKey(); err != nil {
+	// MED-83: the caller's cap on the reserve-paid gas, checked at issue.
+	maxFee, err := optionalMaxFee(params.MaxFee)
+	if err != nil {
 		return "", err
 	}
-	sdk.TssSignKey("primary", sighash)
-
+	if maxFee != nil {
+		if err := failFastOverCap(TokenGasLimit(tokenInfo.GasLimit), maxFee); err != nil {
+			return "", err
+		}
+	}
 	if !DecBalance(caller, tokenInfo.Symbol, amount) {
 		return "", ce.NewContractError(ce.ErrBalance, "insufficient token balance")
 	}
-	// ERC-20 unmap pays L1 gas out of the contract-wide gas-reserve pool
-	// (deductGasReserve below), NOT out of the user's token balance — so the
-	// token supply is debited by the bare amount only.
+	// The gas comes from the shared ETH reserve at issue, priced then (RP-11);
+	// the token supply is debited by the bare amount.
 	TrackWithdrawal(tokenInfo.Symbol, amount)
-
-	// big.Int/wei: gas reserve and gas cost are both full wei — deduct directly.
-	// The reserve is ETH custody, so the spend is also booked against
-	// Active("eth"); restored via TrackReserveRestore if the tx is proven dropped.
-	deductGasReserve(gasCost)
-	TrackReserveSpend(gasCost)
-
-	// W4 Cluster F D-F-3: snapshot vault for ERC-20 path too.
-	ps := PendingSpend{
-		Nonce:         nonce,
-		Amount:        amount,
-		From:          caller,
-		To:            params.To,
-		Asset:         tokenInfo.Symbol,
-		TokenAddress:  params.TokenAddress,
-		UnsignedTxHex: hex.EncodeToString(unsigned),
-		BlockHeight:   blocklist.GetLastHeight(),
-		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
-		GasCost:       gasCost, // wei reserve deducted; refunded on failed receipt (EVM-C4)
-	}
-	StorePendingSpend(ps)
-	logUnmap(ps, amount, false)
-	SetPendingNonce(nonce + 1)
-
-	return hex.EncodeToString(unsigned), nil
+	return submitWithdrawal(QueuedWithdrawal{
+		From:         caller,
+		To:           params.To,
+		Asset:        tokenInfo.Symbol,
+		TokenAddress: params.TokenAddress,
+		Amount:       amount,
+		Debit:        amount,
+		RevertFee:    big.NewInt(tokenInfo.RevertFee),
+		GasLimit:     tokenInfo.GasLimit,
+		MaxFee:       maxFee,
+	}, vaultAddress, chainId)
 }
 
 // logUnmap emits the unmap event (A12). Parity with the BTC mapping contract's
@@ -576,6 +484,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		SetConfirmedNonce(confirmedNonce + 1)
 		sdk.Log("withdrawal_lifecycle " + `{"action":"rolledBack","nonce":` + strconv.FormatUint(confirmedNonce, 10) +
 			`,"from":"` + ps.From + `","amount":"` + ps.Amount.String() + `","asset":"` + ps.Asset + `"}`)
+		DrainWithdrawalQueue(chainId)
 		return nil
 	}
 
@@ -667,7 +576,25 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		// deposit tax keeps funding it, and dropped-tx restores now work.
 		// big.Int/wei: IncBalance and the supply adds cannot overflow, so the
 		// int64 best-effort/drift-marker path from 30710e4 is unnecessary here.
-		IncBalance(ps.From, ps.Asset, ps.Amount)
+		//
+		// USDC-1 (option B): an ERC-20 withdrawal keeps its token's revert fee
+		// (snapshotted at request) out of the refund, credited to the contract
+		// owner, so a deliberately reverting withdrawal (e.g. to a blacklisted
+		// address) is no longer free while the ETH reserve pays its gas. Both
+		// the refund and the fee are user-attributed balances again.
+		refund := new(big.Int).Set(ps.Amount)
+		if ps.Asset != constants.NativeAsset && ps.RevertFee != nil && ps.RevertFee.Sign() > 0 {
+			if owner := sdk.GetEnvKey("contract.owner"); owner != nil && *owner != "" {
+				fee := new(big.Int).Set(ps.RevertFee)
+				if fee.Cmp(refund) > 0 {
+					fee.Set(refund)
+				}
+				refund.Sub(refund, fee)
+				IncBalance(*owner, ps.Asset, fee)
+				sdk.Log("revertfee|n=" + strconv.FormatUint(confirmedNonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + *owner)
+			}
+		}
+		IncBalance(ps.From, ps.Asset, refund)
 		s := GetSupply(ps.Asset)
 		s.Active.Add(s.Active, ps.Amount)
 		s.User.Add(s.User, ps.Amount)
@@ -676,6 +603,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		SetConfirmedNonce(confirmedNonce + 1)
 	}
 
+	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -865,7 +793,11 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		}
 	}
 
-	if swapTo != "" && assetOut != "" {
+	// RP-8: a swap runs at the moment the map lands, which any mapper picks.
+	// Without the depositor's min_amount_out that timing could be used to
+	// trade against the swap, so it is honoured only with one; otherwise the
+	// deposit is credited in its own asset to dest.
+	if swapTo != "" && assetOut != "" && minAmountOut != nil {
 		routerIdPtr := sdk.StateGetObject(constants.RouterContractIdKey)
 		if routerIdPtr == nil || *routerIdPtr == "" {
 			return dest
@@ -1015,6 +947,11 @@ func getTokenInfo(chainId uint64, addr [20]byte) *TokenInfo {
 	if info.MinWithdrawal <= 0 {
 		info.MinWithdrawal = constants.MinUSDCWithdrawal
 	}
+	// USDC-1 B / USDC-GAS-1: optional 4th/5th fields (absent = 0 = defaults).
+	if len(fields) >= 5 {
+		info.RevertFee, _ = strconv.ParseInt(fields[3], 10, 64)
+		info.GasLimit, _ = strconv.ParseUint(fields[4], 10, 64)
+	}
 	return info
 }
 
@@ -1029,6 +966,13 @@ func getTokenInfo(chainId uint64, addr [20]byte) *TokenInfo {
 // no longer accept for that token. Re-registering a token under its own
 // symbol (to change decimals or min_withdrawal) is allowed.
 func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8, minWithdrawal int64) error {
+	return RegisterTokenFull(chainId, addr, symbol, decimals, minWithdrawal, 0, 0)
+}
+
+// RegisterTokenFull also sets the token's revert fee (USDC-1 B) and L1 gas
+// limit (USDC-GAS-1); main.go validates both. The record keeps its 3-field
+// form when both are 0, so tokens registered before keep their exact state.
+func RegisterTokenFull(chainId uint64, addr [20]byte, symbol string, decimals uint8, minWithdrawal, revertFee int64, gasLimit uint64) error {
 	ref := strconv.FormatUint(chainId, 10) + constants.DirPathDelimiter + hex.EncodeToString(addr[:])
 	cur := getTokenInfo(chainId, addr)
 	if cur != nil && cur.Symbol != symbol {
@@ -1043,10 +987,11 @@ func RegisterToken(chainId uint64, addr [20]byte, symbol string, decimals uint8,
 		return errors.New("symbol " + symbol + " is already a registered asset")
 	}
 	key := constants.TokenRegistryPrefix + ref
-	sdk.StateSetObject(
-		key,
-		symbol+"|"+strconv.FormatUint(uint64(decimals), 10)+"|"+strconv.FormatInt(minWithdrawal, 10),
-	)
+	record := symbol + "|" + strconv.FormatUint(uint64(decimals), 10) + "|" + strconv.FormatInt(minWithdrawal, 10)
+	if revertFee != 0 || gasLimit != 0 {
+		record += "|" + strconv.FormatInt(revertFee, 10) + "|" + strconv.FormatUint(gasLimit, 10)
+	}
+	sdk.StateSetObject(key, record)
 	// E1 (RV re-verify): mark the symbol as an allowed ledger asset so
 	// transfer/approve/unmapFrom can reject any other free-form asset string.
 	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
@@ -1208,10 +1153,6 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	if isPaused() {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
-	if HasPendingWithdrawal() {
-		return ce.NewContractError(ce.ErrIntent, "withdrawal pending: wait for confirmation")
-	}
-
 	env := sdk.GetEnv()
 	if err := checkAuth(env); err != nil {
 		return err
@@ -1222,51 +1163,28 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 	if !ok || amount.Sign() <= 0 {
 		return ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
-	if params.Asset == "eth" && amount.Cmp(big.NewInt(constants.MinETHWithdrawal)) < 0 {
+	if params.Asset == constants.NativeAsset && amount.Cmp(big.NewInt(constants.MinETHWithdrawal)) < 0 {
 		return ce.NewContractError(ce.ErrIntent, "below minimum ETH withdrawal")
 	}
-
-	if err := requireTssKey(); err != nil {
-		return err
-	}
-
 	// Validate ALL inputs BEFORE any state mutations
 	toAddr, err := crypto.HexToAddress(params.To)
 	if err != nil {
 		return ce.Prepend(err, "destination address")
 	}
 	// review2 #44: refuse the zero address (TSS-signed burn).
-	// (Also review6 closure T2-14 / M70 — same finding, single guard suffices.)
 	if toAddr == ([20]byte{}) {
 		return ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
 
-	header, herr := pricingHeader()
-	if herr != nil {
-		return herr
-	}
-
-	// W4 Cluster C CRIT #7: compute gas pricing up front for BOTH paths so
-	// the reserve floor check applies to ETH-path withdrawals (pre-fix the
-	// floor check was only run on the ERC-20 path; the ETH path skipped it
-	// entirely, drained the vault, and never deducted fees from the owner).
-	gasTipCap := uint64(2_000_000_000)
-	// review2 HIGH #16: checked cap (gasUnits=0 → just the gasFeeCap; the
-	// per-path fees are computed with safeGasFee below). An extreme base fee
-	// can't wrap uint64 into a tiny gasFeeCap and sign an under-priced tx.
-	gasFeeCap, _, capErr := safeGasFee(0, header.BaseFeePerGas, 2, gasTipCap)
-	if capErr != nil {
-		return ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
-	}
-
-	var tokenAddr [20]byte
-	if params.Asset != "eth" {
+	q := QueuedWithdrawal{From: params.From, To: params.To, Amount: amount}
+	userDebit := new(big.Int).Set(amount)
+	if params.Asset != constants.NativeAsset {
 		if params.TokenAddress == "" {
 			return ce.NewContractError(ce.ErrInput, "token_address required")
 		}
-		tokenAddr, err = crypto.HexToAddress(params.TokenAddress)
-		if err != nil {
-			return ce.Prepend(err, "token_address")
+		tokenAddr, terr := crypto.HexToAddress(params.TokenAddress)
+		if terr != nil {
+			return ce.Prepend(terr, "token_address")
 		}
 		// W4 Cluster B CRIT #6 Site 10: token registry keyed by (chainId, addr).
 		tokenInfo := getTokenInfo(chainId, tokenAddr)
@@ -1276,145 +1194,62 @@ func HandleUnmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint
 		// RV-1 (RV re-verify): bind the DEBITED asset to the WITHDRAWN token.
 		// Pre-fix this path debited params.Asset (free-form) but signed a
 		// transfer of params.TokenAddress, so a caller with allowance on a cheap
-		// asset could drain an expensive token. unmapERC20 already keys off
-		// tokenInfo.Symbol; make unmapFrom match. (Also closes E1 on this path:
-		// params.Asset is now forced to the registered symbol.)
+		// asset could drain an expensive token. (Also closes E1 on this path.)
 		if params.Asset != tokenInfo.Symbol {
 			return ce.NewContractError(ce.ErrInput, "asset does not match the token's registered symbol")
 		}
 		if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 {
 			return ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
 		}
-		if getGasReserve().Cmp(big.NewInt(constants.MinGasReserve)) < 0 {
-			return ce.NewContractError(ce.ErrBalance, "insufficient gas reserve for ERC-20 withdrawal")
+		maxFee, merr := optionalMaxFee(params.MaxFee)
+		if merr != nil {
+			return merr
 		}
+		if maxFee != nil {
+			if ferr := failFastOverCap(TokenGasLimit(tokenInfo.GasLimit), maxFee); ferr != nil {
+				return ferr
+			}
+		}
+		q.Asset, q.TokenAddress = tokenInfo.Symbol, params.TokenAddress
+		q.RevertFee, q.GasLimit, q.MaxFee = big.NewInt(tokenInfo.RevertFee), tokenInfo.GasLimit, maxFee
 	} else {
-		// W4 Cluster C CRIT #7: ETH path now also enforces the gas reserve
-		// floor + debits (amount + fee) from the owner.
-		if getGasReserve().Cmp(big.NewInt(constants.MinGasReserve)) < 0 {
-			return ce.NewContractError(ce.ErrTransaction, "insufficient gas reserve")
+		// W4 Cluster C CRIT #7: the owner pays the L1 fee (amount + fee), never
+		// the vault. RP-4: no gas-reserve floor; the reserve is not touched.
+		feeCap, ferr := ethFeeCap(params.MaxFee)
+		if ferr != nil {
+			return ferr
 		}
-	}
-
-	// Cheap precondition; the binding check happens against the FULL debit
-	// (amount + fee) once the fee is known, below — matching the BTC
-	// mapping contract, where the allowance must cover finalAmt incl. fees
-	// (utxo-mapping checkAndDeductBalance). Without that, a spender could
-	// spend `fee` beyond what the owner authorized.
-	allowance := GetAllowance(params.From, caller, params.Asset)
-	if allowance.Cmp(amount) < 0 {
-		return ce.NewContractError(ce.ErrBalance, "insufficient allowance")
-	}
-
-	// W4 Cluster C CRIT #7 (ETH path) — compute the gas fee and debit
-	// (amount + fee) instead of just amount. Pre-fix, the ETH path
-	// computed no fee and the vault absorbed the L1 mining cost on every
-	// withdrawal. big.Int/wei: amount and fee are both full wei.
-	//
-	// Same uniform shape as HandleUnmapETH: userDebit == l1Value + ethFee,
-	// with fee-on-top vs fee-netted (DeductFee) choosing where the fee sits.
-	userDebit := new(big.Int).Set(amount)
-	l1Value := new(big.Int).Set(amount)
-	ethFee := new(big.Int)
-	if params.Asset == "eth" {
-		_, feeWei, feeErr := safeGasFee(constants.ETHTransferGas, header.BaseFeePerGas, 2, gasTipCap)
-		if feeErr != nil {
-			return ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
-		}
-		if params.MaxFee != "" {
-			maxFee, mok := new(big.Int).SetString(params.MaxFee, 10)
-			if !mok {
-				return ce.NewContractError(ce.ErrInput, "invalid max_fee")
-			}
-			if maxFee.Sign() < 0 {
-				return ce.NewContractError(ce.ErrInput, "max_fee must be non-negative")
-			}
-			if feeWei.Cmp(maxFee) > 0 {
-				return ce.NewContractError(ce.ErrTransaction, "fee exceeds max_fee")
-			}
+		if ferr := failFastOverCap(constants.ETHTransferGas, feeCap); ferr != nil {
+			return ferr
 		}
 		if params.DeductFee {
-			l1Value.Sub(l1Value, feeWei)
-			if l1Value.Sign() <= 0 {
-				return ce.NewContractError(ce.ErrIntent, "amount does not cover the L1 fee")
+			if amount.Cmp(feeCap) <= 0 {
+				return ce.NewContractError(ce.ErrIntent, "amount does not cover the L1 fee cap")
 			}
 		} else {
-			userDebit.Add(amount, feeWei)
+			userDebit.Add(amount, feeCap)
 		}
-		ethFee = feeWei
-		if GetBalance(params.From, "eth").Cmp(userDebit) < 0 {
-			return ce.NewContractError(ce.ErrTransaction, "insufficient balance in owner account")
-		}
+		q.Asset, q.FeeCap, q.DeductFee = constants.NativeAsset, feeCap, params.DeductFee
 	}
-
-	// Binding allowance check: the spender's authorization must cover the
-	// FULL owner debit (value + fee), same as the BTC baseline.
+	if GetBalance(params.From, q.Asset).Cmp(userDebit) < 0 {
+		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
+	}
+	// The spender's authorization must cover the FULL owner debit (value +
+	// fee authorization), same as the BTC baseline.
+	allowance := GetAllowance(params.From, caller, q.Asset)
 	if allowance.Cmp(userDebit) < 0 {
 		return ce.NewContractError(ce.ErrBalance, "insufficient allowance for amount plus fee")
 	}
 
 	// All validation passed — now mutate state
-	if !DecBalance(params.From, params.Asset, userDebit) {
+	if !DecBalance(params.From, q.Asset, userDebit) {
 		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
 	}
-	SetAllowance(params.From, caller, params.Asset, new(big.Int).Sub(allowance, userDebit))
-	// Custody + user attribution shrink by the full debit (ETH: value + fee;
-	// ERC-20: bare amount — its gas comes from the reserve below).
-	TrackWithdrawal(params.Asset, userDebit)
-
-	nonce := GetPendingNonce()
-
-	var unsigned []byte
-	var asset string
-	var tokenAddress string
-	pendingGasCost := ethFee
-	if params.Asset == "eth" {
-		unsigned = BuildETHWithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value)
-		asset = "eth"
-	} else {
-		// ERC-20: token-native units.
-		unsigned = BuildERC20WithdrawalTx(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, amount)
-		asset = params.Asset
-		tokenAddress = params.TokenAddress
-		// review2 HIGH #16: checked gas cost in full wei for the reserve.
-		_, gasReserveFee, feeErr := safeGasFee(constants.ERC20TransferGas, header.BaseFeePerGas, 2, gasTipCap)
-		if feeErr != nil {
-			return ce.NewContractError(ce.ErrArithmetic, "gas fee computation overflow")
-		}
-		// RV-6 (RV re-verify): require the reserve to actually cover this gas
-		// before spending it (the MinGasReserve floor is not enough at a high
-		// base fee; see unmapERC20). Prevents the reserve clamp from silently
-		// under-collateralizing ETH custody.
-		if getGasReserve().Cmp(gasReserveFee) < 0 {
-			return ce.NewContractError(ce.ErrBalance, "gas reserve cannot cover this withdrawal's L1 gas at the current base fee")
-		}
-		// Reserve is ETH custody — book the spend against Active("eth");
-		// restored via TrackReserveRestore if the tx is proven dropped.
-		deductGasReserve(gasReserveFee)
-		TrackReserveSpend(gasReserveFee)
-		pendingGasCost = gasReserveFee
-	}
-
-	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey("primary", sighash)
-
-	// W4 Cluster F D-F-3: snapshot vault for HandleUnmapFrom path.
-	ps := PendingSpend{
-		Nonce:         nonce,
-		Amount:        l1Value, // ETH: L1 tx value (== amount for ERC-20)
-		From:          params.From,
-		To:            params.To,
-		Asset:         asset,
-		TokenAddress:  tokenAddress,
-		UnsignedTxHex: hex.EncodeToString(unsigned),
-		BlockHeight:   blocklist.GetLastHeight(),
-		VaultAtQueue:  "0x" + hex.EncodeToString(vaultAddress[:]),
-		GasCost:       pendingGasCost, // prepaid fee (ETH) / reserve charge (ERC-20); restored on proven drop
-	}
-	StorePendingSpend(ps)
-	logUnmap(ps, userDebit, params.Asset == "eth")
-	SetPendingNonce(nonce + 1)
-	return nil
+	SetAllowance(params.From, caller, q.Asset, new(big.Int).Sub(allowance, userDebit))
+	TrackWithdrawal(q.Asset, userDebit)
+	q.Debit = userDebit
+	_, err = submitWithdrawal(q, vaultAddress, chainId)
+	return err
 }
 
 func HandleIncreaseAllowance(params *AllowanceParams) error {
@@ -1556,7 +1391,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 		if terr != nil {
 			return errors.New("pending spend token address parse failed: " + terr.Error())
 		}
-		unsigned = BuildERC20WithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, ps.Amount)
+		unsigned = BuildERC20WithdrawalTxGas(chainId, confirmedNonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, ps.Amount, ps.GasLimit)
 	}
 
 	sighash := ComputeSighash(unsigned)
@@ -1654,7 +1489,10 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 	// bug #8: NonceAdvance re-reads the PendingSpend and no-ops once it's
 	// deleted, so advance BEFORE DeletePendingSpend (race-safe vs HandleExpireWithdrawal).
 	NonceAdvance(ps, 1)
-	SetPendingNonce(GetConfirmedNonce())
+	// RP-11: do NOT reset the pending nonce here. Several withdrawals may be in
+	// flight with signed txs at the following nonces; resetting would re-issue
+	// those nonces. The head's nonce was consumed on L1 (the proof shows its tx
+	// mined and reverted), so only the confirmed nonce moves.
 	DeletePendingSpend(confirmedNonce)
 	sdk.Log(
 		"withdrawal_lifecycle " + `{"action":"clearNonce","nonce":` + strconv.FormatUint(
@@ -1662,6 +1500,7 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 			10,
 		) + `,"from":"` + ps.From + `","proof_type":"` + proof.Type + `"}`,
 	)
+	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1727,7 +1566,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 	refundDroppedWithdrawal(ps)
 	// bug #8: advance BEFORE delete (NonceAdvance no-ops once PendingSpend gone).
 	NonceAdvance(ps, 1)
-	SetPendingNonce(GetConfirmedNonce())
+	// RP-11: no pending-nonce reset (see HandleClearNonce).
 	DeletePendingSpend(nonce)
 	sdk.Log(
 		"withdrawal_lifecycle " + `{"action":"expireWithdrawal","nonce":` + strconv.FormatUint(
@@ -1735,6 +1574,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 			10,
 		) + `,"from":"` + ps.From + `","caller":"` + caller + `","proof_type":"` + proof.Type + `"}`,
 	)
+	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1782,7 +1622,7 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 	refundDroppedWithdrawal(ps)
 	// bug #8: advance BEFORE delete (NonceAdvance no-ops once PendingSpend gone).
 	NonceAdvance(ps, 1)
-	SetPendingNonce(GetConfirmedNonce())
+	// RP-11: no pending-nonce reset (see HandleClearNonce).
 	DeletePendingSpend(nonce)
 	sdk.Log(
 		"withdrawal_lifecycle " + `{"action":"cancelMyWithdrawal","nonce":` + strconv.FormatUint(
@@ -1790,6 +1630,7 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 			10,
 		) + `,"from":"` + ps.From + `","proof_type":"` + proof.Type + `"}`,
 	)
+	DrainWithdrawalQueue(chainId)
 	return nil
 }
 
@@ -1876,6 +1717,13 @@ func HandleClearTestnetState() error {
 	}
 	sdk.StateDeleteObject(constants.NonceConfirmedKey)
 	sdk.StateDeleteObject(constants.NoncePendingKey)
+	// RP-11: the withdrawal queue too.
+	qh, qt := QueueBounds()
+	for seq := qh; seq < qt; seq++ {
+		sdk.StateDeleteObject(queueKey(seq))
+	}
+	sdk.StateDeleteObject(constants.WithdrawQueueHeadKey)
+	sdk.StateDeleteObject(constants.WithdrawQueueTailKey)
 	// Observed-list cleanup window.
 	lastH := blocklist.GetLastHeight()
 	startH := uint64(0)

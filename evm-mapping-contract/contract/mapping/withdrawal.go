@@ -93,6 +93,12 @@ type PendingSpend struct {
 	// self-transfer at Nonce, and confirmSpend accepts either that or the
 	// withdrawal itself, whichever mined.
 	Rolled bool `json:"rolled,omitempty"`
+	// RevertFee (USDC-1 B, ERC-20) is kept from the refund if the L1 transfer
+	// mines and reverts; snapshotted from the token registry at request time.
+	RevertFee *big.Int `json:"revert_fee,omitempty"`
+	// GasLimit (USDC-GAS-1, ERC-20) is the L1 gas limit the transfer was
+	// signed with (0 = ERC20TransferGas); replaceWithdrawal reuses it.
+	GasLimit uint64 `json:"gas_limit,omitempty"`
 }
 
 func StorePendingSpend(ps PendingSpend) {
@@ -150,17 +156,36 @@ func BuildERC20WithdrawalTx(
 	tokenAddr, recipient [20]byte,
 	amount *big.Int,
 ) []byte {
+	return BuildERC20WithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, recipient, amount, 0)
+}
+
+// BuildERC20WithdrawalTxGas is BuildERC20WithdrawalTx with the token's L1 gas
+// limit (USDC-GAS-1); 0 means ERC20TransferGas.
+func BuildERC20WithdrawalTxGas(
+	chainId, nonce, gasTipCap, gasFeeCap uint64,
+	tokenAddr, recipient [20]byte,
+	amount *big.Int,
+	gas uint64,
+) []byte {
 	calldata := abi.EncodeTransfer(recipient, amount)
 	return buildEIP1559Tx(
 		chainId,
 		nonce,
 		gasTipCap,
 		gasFeeCap,
-		constants.ERC20TransferGas,
+		TokenGasLimit(gas),
 		tokenAddr,
 		big.NewInt(0),
 		calldata,
 	)
+}
+
+// TokenGasLimit is the effective L1 gas limit for an ERC-20 transfer.
+func TokenGasLimit(gas uint64) uint64 {
+	if gas == 0 {
+		return constants.ERC20TransferGas
+	}
+	return gas
 }
 
 func buildEIP1559Tx(chainId, nonce, gasTipCap, gasFeeCap, gas uint64, to [20]byte, value *big.Int, data []byte) []byte {
@@ -265,4 +290,84 @@ func splitPipe(s string) []string {
 	}
 	result = append(result, s[start:])
 	return result
+}
+
+// ---- RP-11: the L2 withdrawal queue ----
+
+// InFlightWithdrawals is how many withdrawals hold a vault nonce (signed, sent
+// or not, unconfirmed): the pending nonce minus the confirmed nonce.
+func InFlightWithdrawals() uint64 {
+	p, c := GetPendingNonce(), GetConfirmedNonce()
+	if p < c {
+		return 0
+	}
+	return p - c
+}
+
+func queueCounter(key string) uint64 {
+	data := sdk.StateGetObject(key)
+	if data == nil {
+		return 0
+	}
+	n, _ := strconv.ParseUint(*data, 10, 64)
+	return n
+}
+
+// QueueBounds returns [head, tail): seqs below head are gone; seqs in the
+// range may be queued or already removed (cancelled, issued out of order).
+func QueueBounds() (uint64, uint64) {
+	return queueCounter(constants.WithdrawQueueHeadKey), queueCounter(constants.WithdrawQueueTailKey)
+}
+
+// QueueLen is an upper bound on the queued entries (tail - head).
+func QueueLen() uint64 {
+	h, t := QueueBounds()
+	if t < h {
+		return 0
+	}
+	return t - h
+}
+
+// HasQueuedOrPendingWithdrawal reports any withdrawal in flight or queued.
+func HasQueuedOrPendingWithdrawal() bool {
+	return HasPendingWithdrawal() || QueueLen() > 0
+}
+
+func queueKey(seq uint64) string {
+	return constants.WithdrawQueuePrefix + strconv.FormatUint(seq, 10)
+}
+
+// Enqueue stores q at the tail and returns its seq.
+func Enqueue(q QueuedWithdrawal) uint64 {
+	_, tail := QueueBounds()
+	q.Seq = tail
+	b, err := json.Marshal(q)
+	if err != nil {
+		sdk.Revert("queued withdrawal marshal failed", "enqueue")
+	}
+	sdk.StateSetObject(queueKey(tail), string(b))
+	sdk.StateSetObject(constants.WithdrawQueueTailKey, strconv.FormatUint(tail+1, 10))
+	return tail
+}
+
+func GetQueued(seq uint64) *QueuedWithdrawal {
+	data := sdk.StateGetObject(queueKey(seq))
+	if data == nil || *data == "" {
+		return nil
+	}
+	var q QueuedWithdrawal
+	if err := json.Unmarshal([]byte(*data), &q); err != nil {
+		return nil
+	}
+	return &q
+}
+
+// RemoveQueued deletes entry seq and advances the head past removed entries.
+func RemoveQueued(seq uint64) {
+	sdk.StateDeleteObject(queueKey(seq))
+	head, tail := QueueBounds()
+	for head < tail && GetQueued(head) == nil {
+		head++
+	}
+	sdk.StateSetObject(constants.WithdrawQueueHeadKey, strconv.FormatUint(head, 10))
 }

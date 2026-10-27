@@ -195,3 +195,36 @@ const ReplaceWithdrawalCooldown uint64 = 200
 // initContract when IsTestnet=true. clearTestnetState reads this key and
 // aborts if absent or != "true".
 const IsTestnetKey = "is_testnet"
+
+// RP-11: withdrawals are queued on L2 and only MaxInFlightWithdrawals of them
+// hold a vault nonce (signed, on L1, unconfirmed) at a time. A user's unmap
+// never fails because someone else is withdrawing: it debits and queues; each
+// head close (and drainWithdrawalQueue) moves queued entries into flight.
+// The cap bounds the EVM vault's concurrent TSS sign sessions, which share the
+// signing interval with every other key (the BTC vault's included).
+const (
+	WithdrawQueuePrefix  = "wq" + DirPathDelimiter // wq-{seq} → JSON QueuedWithdrawal
+	WithdrawQueueHeadKey = "wqh"                   // lowest seq that may still be queued
+	WithdrawQueueTailKey = "wqt"                   // next seq to assign
+)
+
+const MaxInFlightWithdrawals uint64 = 8
+
+// MaxQueuedWithdrawals bounds the queue's storage; above it an unmap is refused
+// (the only remaining "busy" refusal, at a depth no normal load reaches).
+const MaxQueuedWithdrawals uint64 = 1024
+
+// MaxDrainScan bounds how many queue entries one drain inspects, so a long run
+// of entries that cannot be issued yet (fee cap, reserve) stays cheap.
+const MaxDrainScan uint64 = 32
+
+// DefaultETHFeeCapFloor is the smallest default fee authorization an ETH unmap
+// reserves when the caller sets no max_fee: ETHTransferGas at 20 gwei. The
+// unused part is refunded when the withdrawal is priced and issued.
+const DefaultETHFeeCapFloor = int64(420_000_000_000_000) // 21,000 x 20 gwei
+
+// USDC-GAS-1: per-token gas limit bounds for registerToken (0 = ERC20TransferGas).
+const (
+	MinTokenGasLimit uint64 = 21_000
+	MaxTokenGasLimit uint64 = 500_000
+)

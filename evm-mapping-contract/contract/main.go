@@ -204,6 +204,28 @@ func unmapERC20(input *string) *string {
 	return nil
 }
 
+// RP-11: move queued withdrawals into flight now (permissionless; the bot
+// calls it after a proof brings a fresh pricing header). Never fails: when
+// nothing can be issued it is a no-op.
+//
+//go:wasmexport drainWithdrawalQueue
+func drainWithdrawalQueue(input *string) *string {
+	mapping.DrainWithdrawalQueue(chainId())
+	return nil
+}
+
+// RP-11: the owner of a queued (not yet issued) withdrawal takes it back.
+//
+//go:wasmexport cancelQueuedWithdrawal
+func cancelQueuedWithdrawal(input *string) *string {
+	var p mapping.CancelQueuedParams
+	unmarshalParams(input, &p)
+	if err := mapping.HandleCancelQueuedWithdrawal(p.Seq); err != nil {
+		ce.CustomAbort(err)
+	}
+	return nil
+}
+
 //go:wasmexport confirmSpend
 func confirmSpend(input *string) *string {
 	var req mapping.ConfirmSpendRequest
@@ -488,9 +510,9 @@ func dispatchAdmin(action string, payload []byte) {
 		// old one. Any in-flight withdrawal (its confirmSpend proof binds to a
 		// height anchored under the OLD verifier) would become unconfirmable.
 		// Refuse the swap while a withdrawal is pending so the operator must
-		// first drain/expire the queue (HasPendingWithdrawal is the same
-		// single-outstanding invariant the unmap handlers gate on).
-		if mapping.HasPendingWithdrawal() {
+		// first drain/expire the queue. RP-11: queued withdrawals count too,
+		// they will be issued against the verifier's headers.
+		if mapping.HasQueuedOrPendingWithdrawal() {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVerifierContract: withdrawal pending — drain/expire before swapping verifier"))
 		}
 		sdk.StateSetObject(constants.VerifierContractIdKey, p.ContractId)
@@ -566,7 +588,20 @@ func dispatchAdmin(action string, payload []byte) {
 		if p.MinWithdrawal < 0 || p.MinWithdrawal > constants.MaxTokenMinWithdrawal {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal out of range"))
 		}
-		if err := mapping.RegisterToken(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal); err != nil {
+		// USDC-1 B: the revert fee is kept out of a reverted withdrawal's refund,
+		// so it must not exceed the smallest withdrawal (the refund stays >= 0).
+		effMin := p.MinWithdrawal
+		if effMin <= 0 {
+			effMin = constants.MinUSDCWithdrawal
+		}
+		if p.RevertFee < 0 || p.RevertFee > effMin {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: revert_fee must be between 0 and min_withdrawal"))
+		}
+		// USDC-GAS-1: 0 = ERC20TransferGas, else within the token gas bounds.
+		if p.GasLimit != 0 && (p.GasLimit < constants.MinTokenGasLimit || p.GasLimit > constants.MaxTokenGasLimit) {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: gas_limit out of range"))
+		}
+		if err := mapping.RegisterTokenFull(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal, p.RevertFee, p.GasLimit); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: "+err.Error()))
 		}
 

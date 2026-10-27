@@ -1,5 +1,7 @@
 package mapping
 
+import "math/big"
+
 type MapParams struct {
 	TxData       VerificationRequest `json:"tx_data"`
 	Instructions []string            `json:"instructions"`
@@ -36,12 +38,21 @@ type RegisterTokenParams struct {
 	Symbol        string `json:"symbol"`
 	Decimals      uint8  `json:"decimals"`
 	MinWithdrawal int64  `json:"min_withdrawal"`
+	// USDC-1 (option B): token units kept from a withdrawal whose L1 transfer
+	// reverts (e.g. to a blacklisted address); the rest is refunded. 0 = none.
+	// Must not exceed MinWithdrawal, so a refund is never negative.
+	RevertFee int64 `json:"revert_fee"`
+	// USDC-GAS-1: the L1 gas limit for this token's transfer (0 = the default
+	// ERC20TransferGas); within MinTokenGasLimit..MaxTokenGasLimit.
+	GasLimit uint64 `json:"gas_limit"`
 }
 
 type TokenInfo struct {
 	Symbol        string `json:"symbol"`
 	Decimals      uint8  `json:"decimals"`
 	MinWithdrawal int64  `json:"min_withdrawal"`
+	RevertFee     int64  `json:"revert_fee"`
+	GasLimit      uint64 `json:"gas_limit"`
 }
 
 // ConfirmSpendRequest carries both tx and receipt proofs for withdrawal
@@ -211,4 +222,34 @@ type ParsedLog struct {
 	Address [20]byte
 	Topics  [][32]byte
 	Data    []byte
+}
+
+// QueuedWithdrawal (RP-11) is a validated, debited withdrawal waiting for a
+// vault nonce. It is priced when it is issued (drainWithdrawalQueue), not
+// here: the newest proven header may be hours old while the bridge is idle.
+type QueuedWithdrawal struct {
+	Seq          uint64 `json:"seq"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Asset        string `json:"asset"`
+	TokenAddress string `json:"token_address,omitempty"`
+	// Amount is what the caller asked to withdraw (ETH: before a netted fee).
+	Amount *big.Int `json:"amount"`
+	// Debit is what left the owner's balance: ETH = Amount + FeeCap (fee on
+	// top) or Amount (DeductFee); ERC-20 = Amount. Refunded in full on cancel.
+	Debit *big.Int `json:"debit"`
+	// FeeCap (ETH only) is the fee the owner authorized; the priced fee must
+	// not exceed it, and the unused part is refunded at issue.
+	FeeCap    *big.Int `json:"fee_cap,omitempty"`
+	DeductFee bool     `json:"deduct_fee,omitempty"`
+	// ERC-20: snapshotted from the token registry at request time.
+	RevertFee *big.Int `json:"revert_fee,omitempty"`
+	GasLimit  uint64   `json:"gas_limit,omitempty"`
+	// MaxFee (ERC-20) is the caller's cap on the reserve-paid gas, if set.
+	MaxFee *big.Int `json:"max_fee,omitempty"`
+}
+
+// CancelQueuedParams names the queue entry to cancel (cancelQueuedWithdrawal).
+type CancelQueuedParams struct {
+	Seq uint64 `json:"seq"`
 }
