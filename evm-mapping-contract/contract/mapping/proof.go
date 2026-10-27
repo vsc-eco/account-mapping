@@ -250,6 +250,14 @@ func VerifyERC20Deposit(
 		)
 	}
 
+	// RP-7: a transfer that paid a MagiDeposit deposit is credited to the
+	// recipient its Deposit log names (deposit_type "contract"), never here
+	// to the sender as well.
+	if transferPaysAContractDeposit(logs, int(req.LogIndex), vaultAddress) {
+		return sender, nil, txHash, ce.NewContractError(ce.ErrInput,
+			"this transfer paid a MagiDeposit deposit: map its Deposit log (deposit_type contract)")
+	}
+
 	// Amount from log.Data (uint256, big-endian)
 	amount := log.Data
 

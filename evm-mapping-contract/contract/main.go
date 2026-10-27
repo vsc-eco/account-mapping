@@ -298,6 +298,19 @@ func decreaseAllowance(input *string) *string {
 	return nil
 }
 
+// depositAddress returns the vault's MagiDeposit address (RP-7, EIP-55), where
+// a deposit for an explicit Magi recipient is made; "" while there is no vault.
+//
+//go:wasmexport depositAddress
+func depositAddress(_ *string) *string {
+	v, ok := mapping.TssVaultAddress()
+	out := ""
+	if ok {
+		out = crypto.ChecksumHex(mapping.DepositContractAddress(v))
+	}
+	return &out
+}
+
 //go:wasmexport getInfo
 //
 // Pentest finding F3: previously returned nil, which broke

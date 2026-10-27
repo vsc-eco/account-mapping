@@ -172,8 +172,11 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		MarkObserved(req.BlockHeight, txHash, uint16(req.LogIndex))
 		return nil
 
+	case "contract":
+		return handleContractDeposit(req, vaultAddress, chainId)
+
 	default:
-		return ce.NewContractError(ce.ErrInput, "deposit_type must be 'eth' or 'erc20'")
+		return ce.NewContractError(ce.ErrInput, "deposit_type must be 'eth', 'erc20' or 'contract'")
 	}
 }
 
