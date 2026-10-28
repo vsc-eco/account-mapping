@@ -126,6 +126,13 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// (credit + fee) is still the user supply this deposit adds.
 		credit := takeDepositProofFee("eth", netAmount)
 
+		// MAP-CEI-1: lock the observed slot before routeDeposit calls the DEX
+		// router, so a contract on the router's path that calls map again with
+		// this deposit finds it processed (it was credited twice). CRIT #8
+		// still holds: nothing below can return an error, and an abort reverts
+		// the slot with everything else.
+		MarkObserved(req.BlockHeight, txHash, uint16(req.TxIndex))
+
 		// Honor the depositor-signed instructions: deposit_to redirect, or a
 		// swap_to/asset_out DEX swap. routeDeposit returns the L2 destination,
 		// or "" when it dispatched the swap (which already credited the funds).
@@ -134,10 +141,6 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 			IncBalance(dest, "eth", credit)
 		}
 		TrackDeposit("eth", netAmount, gasTax)
-		// CRIT #8 / W4 Cluster A: lock the observed slot only after the
-		// deposit has been fully routed + credited + accounted. If any
-		// earlier step errors, the slot stays open for the next attempt.
-		MarkObserved(req.BlockHeight, txHash, uint16(req.TxIndex))
 		return nil
 
 	case "erc20":
