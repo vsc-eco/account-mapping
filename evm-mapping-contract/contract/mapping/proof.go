@@ -309,9 +309,9 @@ func VerifyERC20Deposit(
 //
 // E18: types 1 (EIP-2930), 3 (EIP-4844) and 4 (EIP-7702) used to be refused, so
 // ETH a user sent to the vault in one of them was never credited and had no
-// recovery path. A value transfer to the vault EOA succeeds whenever the tx is
-// included, whatever its type, so inclusion in the proven tx trie is as good a
-// deposit proof for these types as for type 2.
+// recovery path. A deposit's proof is the same for every type (inclusion in
+// the proven tx trie, and its receipt's success status, FAILDEP-1), so these
+// types are accepted like type 2.
 func parseTransaction(raw []byte) (*ParsedTx, error) {
 	if len(raw) == 0 {
 		return nil, ce.NewContractError(ce.ErrInput, "empty transaction")
