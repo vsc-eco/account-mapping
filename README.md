@@ -31,8 +31,8 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 - `unmapERC20` — withdraw a registered ERC-20 token (its gas limit is the one it was registered with)
 - `unmapFrom` — withdraw on behalf of a third party via allowance
 - Up to 8 withdrawals are in flight at once on consecutive vault nonces and confirm in nonce order (RP-11). With nothing waiting, an unmap is issued (priced and TSS-signed) at once and returns `issued:{nonce}`; otherwise it waits in an L2 queue (FIFO, up to 1,024) and returns `queued:{seq}`. Nothing another user does refuses a withdrawal; only a full queue does.
-- `drainWithdrawalQueue` — `{"max": n}` (default 1, at most 8): issue queued withdrawals into free slots (permissionless; the bot calls it). Only this call issues queued ones.
-- `cancelQueuedWithdrawal` — `{"seq": n}`: the owner of a queued (not yet issued) withdrawal takes it back in full
+- `drainWithdrawalQueue` — `{"max": n}` (default 1, at most 8): issue queued withdrawals into free slots (permissionless; the bot calls it). Only this call issues queued ones. A queued withdrawal its own terms cannot pay at the current price (the ETH fee above its `max_fee` or above a `deduct_fee` amount, an ERC-20 transfer's gas above its `max_fee`) is refunded to its owner in full instead (QFREEZE-1, as the BTC contract's drain does); one waiting on the gas reserve stays queued. Up to 32 entries are issued or refunded per call (~1,235 RC per refund).
+- `cancelQueuedWithdrawal` — `{"seq": n}`: the owner of a queued (not yet issued) withdrawal, or the contract owner, takes it back in full to the withdrawal's owner
 - `rollWithdrawal` — after 1200 verified L1 blocks, anyone may roll back a withdrawal that never mined: the vault signs a 0-value self-transfer at its nonce, and `confirmSpend` refunds the withdrawer once that mines. The refund is the withdrawal's amount; the L1 fee prepaid with it is not returned (the vault pays for the roll itself)
 - `expireWithdrawal` / `cancelMyWithdrawal` — release a withdrawal that can no longer complete
 

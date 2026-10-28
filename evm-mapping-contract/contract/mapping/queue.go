@@ -34,8 +34,10 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 	// Nothing waiting: issue now, without writing a queue entry that the same
 	// call would delete (a state write costs RC even when it is undone).
 	if QueueLen() == 0 {
-		if header := issuableNow(vault); header != nil && issueQueued(&q, vault, chainId, header) {
-			return "issued:" + strconv.FormatUint(next, 10), nil
+		if header := issuableNow(vault); header != nil {
+			if out, _ := issueQueued(&q, vault, chainId, header); out == queueIssued {
+				return "issued:" + strconv.FormatUint(next, 10), nil
+			}
 		}
 	}
 	if QueueLen() >= constants.MaxQueuedWithdrawals {
@@ -49,8 +51,16 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 // DrainWithdrawalQueue moves up to max queued withdrawals into flight, oldest
 // first, while fewer than MaxInFlightWithdrawals are in flight. It never fails
 // the calling transaction: when it cannot issue (paused, no active TSS key or
-// verified vault, stale pricing header, an entry's fee cap or the gas reserve
-// too low at the current price) the entries stay queued and it returns.
+// verified vault, stale pricing header, the gas reserve too low at the current
+// price) the entries stay queued and it returns.
+//
+// QFREEZE-1: an entry its own terms cannot pay at the current (fresh) price —
+// the ETH fee above its cap or above a netted amount, an ERC-20 transfer's gas
+// above its max_fee — is refunded to its owner in full and removed, as the BTC
+// mapping contract's drain refunds a queued withdrawal it cannot pay at the
+// current fee rate (unmap_queue.go drainUnmapQueue). It used to stay at the
+// head: 32 such entries (max_fee 1 wei, queued while no fresh pricing header
+// existed) took every drain's MaxDrainScan budget and froze all withdrawals.
 func DrainWithdrawalQueue(chainId uint64, max int) int {
 	vault, ok := TssVaultAddress()
 	if !ok {
@@ -116,23 +126,43 @@ func drainWith(chainId uint64, vault [20]byte, max int) int {
 			continue
 		}
 		scanned++
-		if issueQueued(q, vault, chainId, header) {
+		switch out, why := issueQueued(q, vault, chainId, header); out {
+		case queueIssued:
 			RemoveQueued(seq)
 			issued++
+		case queueRefund:
+			refundQueued(seq, q, why)
 		}
 	}
 	return issued
 }
 
+// What issueQueued did with an entry.
+const (
+	queueIssued = iota // in flight now
+	queueWait          // not now: a shared condition (the gas reserve); it stays queued
+	queueRefund        // its own terms cannot pay at this price: refund it
+)
+
+// refundQueued returns a queued withdrawal's whole debit to its owner and
+// removes it (QFREEZE-1).
+func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
+	IncBalance(q.From, q.Asset, q.Debit)
+	trackRefund(q.Asset, q.Debit)
+	RemoveQueued(seq)
+	sdk.Log("unmapq|refund|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|why=" + why)
+}
+
 // issueQueued prices q from header, gives it the next vault nonce, requests the
-// TSS signature and stores its PendingSpend. It returns false (and changes
-// nothing) when q cannot be issued at this price: the ETH fee is above the
-// caller's cap or does not fit in a netted amount, or (ERC-20) the caller's
-// max_fee or the gas reserve does not cover the gas.
-func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *blocklist.EthBlockHeader) bool {
+// TSS signature and stores its PendingSpend (queueIssued). It changes nothing
+// when q cannot be issued at this price: queueRefund (with why) when q's own
+// terms cannot pay it (the ETH fee is above the caller's cap or does not fit
+// in a netted amount; an ERC-20 transfer's gas is above the caller's
+// max_fee), queueWait when the gas reserve does not cover an ERC-20 transfer.
+func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *blocklist.EthBlockHeader) (int, string) {
 	toAddr, err := crypto.HexToAddress(q.To)
 	if err != nil || toAddr == ([20]byte{}) {
-		return false // validated at request time; unreachable
+		return queueRefund, "bad recipient" // validated at request time; unreachable
 	}
 	const gasTipCap = uint64(2_000_000_000) // 2 gwei, as before
 	nonce := GetPendingNonce()
@@ -150,14 +180,17 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	if q.Asset == constants.NativeAsset {
 		gas := ETHGasLimit(q.GasLimit)
 		gasFeeCap, feeWei, ferr := safeGasFee(gas, header.BaseFeePerGas, 2, gasTipCap)
-		if ferr != nil || (q.FeeCap != nil && feeWei.Cmp(q.FeeCap) > 0) {
-			return false
+		if ferr != nil {
+			return queueWait, ""
+		}
+		if q.FeeCap != nil && feeWei.Cmp(q.FeeCap) > 0 {
+			return queueRefund, "fee " + feeWei.String() + " above the cap " + q.FeeCap.String()
 		}
 		l1Value := new(big.Int).Set(q.Amount)
 		if q.DeductFee {
 			l1Value.Sub(l1Value, feeWei)
 			if l1Value.Sign() <= 0 {
-				return false
+				return queueRefund, "fee " + feeWei.String() + " not below the amount"
 			}
 			userCost.Set(q.Amount)
 		} else {
@@ -178,17 +211,20 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	} else {
 		tokenAddr, terr := crypto.HexToAddress(q.TokenAddress)
 		if terr != nil {
-			return false // validated at request time; unreachable
+			return queueRefund, "bad token" // validated at request time; unreachable
 		}
 		gasFeeCap, gasCost, ferr := safeGasFee(TokenGasLimit(q.GasLimit), header.BaseFeePerGas, 2, gasTipCap)
-		if ferr != nil || (q.MaxFee != nil && gasCost.Cmp(q.MaxFee) > 0) {
-			return false
+		if ferr != nil {
+			return queueWait, ""
+		}
+		if q.MaxFee != nil && gasCost.Cmp(q.MaxFee) > 0 {
+			return queueRefund, "gas " + gasCost.String() + " above the max_fee " + q.MaxFee.String()
 		}
 		// The ERC-20 gas comes from the shared ETH reserve: keep its floor and
 		// require it to cover this transfer (RV-6), else wait for a top-up.
 		reserve := getGasReserve()
 		if reserve.Cmp(big.NewInt(constants.MinGasReserve)) < 0 || reserve.Cmp(gasCost) < 0 {
-			return false
+			return queueWait, ""
 		}
 		deductGasReserve(gasCost)
 		TrackReserveSpend(gasCost)
@@ -204,12 +240,16 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	StorePendingSpend(ps)
 	logUnmap(ps, userCost, q.Asset == constants.NativeAsset)
 	SetPendingNonce(nonce + 1)
-	return true
+	return queueIssued, ""
 }
 
 // HandleCancelQueuedWithdrawal returns a queued (not yet issued) withdrawal to
 // its owner in full. Nothing reached L1, so no proof is needed. Allowed while
-// paused: it only moves funds back to the owner's L2 balance.
+// paused: it only moves funds back to the owner's L2 balance. The withdrawal's
+// owner may cancel it, and so may the contract owner (an escape hatch for an
+// entry that cannot be paid, as in the BTC mapping contract's
+// HandleCancelQueuedUnmap); the debit goes back to the withdrawal's owner
+// either way.
 func HandleCancelQueuedWithdrawal(seq uint64) error {
 	env := sdk.GetEnv()
 	if err := checkAuth(env); err != nil {
@@ -219,13 +259,15 @@ func HandleCancelQueuedWithdrawal(seq uint64) error {
 	if q == nil {
 		return ce.NewContractError(ce.ErrIntent, "no queued withdrawal "+strconv.FormatUint(seq, 10))
 	}
-	if !crypto.SameIdentity(env.Caller.String(), q.From) {
-		return errors.New("cancelQueuedWithdrawal: only the withdrawal's owner can cancel it")
+	caller := env.Caller.String()
+	owner := sdk.GetEnvKey("contract.owner")
+	if !crypto.SameIdentity(caller, q.From) && (owner == nil || caller != *owner) {
+		return errors.New("cancelQueuedWithdrawal: only the withdrawal's owner or the contract owner can cancel it")
 	}
 	IncBalance(q.From, q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq)
-	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String())
+	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|by=" + caller)
 	return nil
 }
 
