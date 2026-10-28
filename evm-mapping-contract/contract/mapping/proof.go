@@ -98,6 +98,26 @@ func VerifyETHDeposit(
 		return sender, nil, nil, txHash, ErrNotVaultDeposit
 	}
 
+	// FAILDEP-1: the tx must have succeeded. A reverted tx is in the block but
+	// moved no value; under Glamsterdam (EIP-8037) a transfer that creates the
+	// vault's account reverts at 21,000 gas, so before the first deposit anyone
+	// could mint by "sending" ETH they keep. The receipt at the same index
+	// (base64 proof, leaf = the receipt) must have status 1 (parseReceiptLogs).
+	if req.ReceiptProof == "" {
+		return sender, nil, nil, txHash, ce.NewContractError(ce.ErrInput, "an eth deposit needs receipt_proof (its status proves the value moved)")
+	}
+	rcptProof, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
+	if err != nil || len(rcptProof) == 0 {
+		return sender, nil, nil, txHash, ce.NewContractError(ce.ErrInput, "receipt_proof must be base64 (concatenated receipt-trie MPT nodes)")
+	}
+	receipt, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(rcptProof))
+	if err != nil {
+		return sender, nil, nil, txHash, ErrProofFailed
+	}
+	if _, err := parseReceiptLogs(receipt); err != nil {
+		return sender, nil, nil, txHash, ce.Prepend(err, "eth deposit receipt")
+	}
+
 	// Recover sender via ecrecover
 	sighash := computeTxSighash(rawBytes, parsedTx)
 	recoveryV := byte(27 + parsedTx.V)
