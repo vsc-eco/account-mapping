@@ -11,6 +11,7 @@ import (
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/mapping"
 	"evm-mapping-contract/sdk"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -651,6 +652,31 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setETHGasLimit: gas_limit out of range"))
 		}
 		mapping.SetETHGasLimit(p.GasLimit)
+
+	case "setProofFee":
+		// The proving fee of one asset ("eth" or a registered token's symbol),
+		// in its smallest unit; 0 removes it. At most half the asset's smallest
+		// creditable deposit, so a compromised owner key cannot take deposits
+		// through it.
+		var p struct {
+			Asset  string `json:"asset"`
+			Amount string `json:"amount"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: bad payload"))
+		}
+		fee, ok := new(big.Int).SetString(p.Amount, 10)
+		if !ok || fee.Sign() < 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: amount must be a non-negative integer"))
+		}
+		floor := mapping.ProofFeeFloor(p.Asset)
+		if floor == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: unknown asset "+p.Asset))
+		}
+		if fee.Cmp(mapping.MaxProofFee(floor)) > 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: amount above half the asset's minimum deposit"))
+		}
+		mapping.SetProofFee(p.Asset, fee)
 
 	case "registerRouter":
 		assertNotPaused()

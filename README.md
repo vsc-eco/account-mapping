@@ -48,10 +48,16 @@ The vault, the L1 address that holds mapped funds, is the Ethereum address of th
 **Admin / owner** (`propose`, then `execute` once the timelock has passed; `cancel`, `expireProposal`):
 - ~14 days (400K blocks): `setVerifierContract`, `createKey`
 - 24 hours: `replaceWithdrawal`, `clearNonce`
-- 6 hours: `registerToken`, `registerRouter`, `registerRelayer`, `deregisterRelayer`, `clearTestnetState`, `setETHGasLimit` (`{"gas_limit"}`, the default gas of an ETH withdrawal; raise it when the chain prices account creation higher)
+- 6 hours: `registerToken`, `registerRouter`, `registerRelayer`, `deregisterRelayer`, `clearTestnetState`, `setETHGasLimit` (`{"gas_limit"}`, the default gas of an ETH withdrawal; raise it when the chain prices account creation higher), `setProofFee` (`{"asset", "amount"}`, see below)
 - immediate: `pause`, `unpause`, `renewKey` (also while paused)
 
 `registerToken` takes `{"address", "symbol", "decimals", "min_withdrawal"}` and optionally `revert_fee` (token units kept from a withdrawal whose L1 transfer reverts, e.g. to a blacklisted address; at most `min_withdrawal`; credited to the owner; USDC-1 B) and `gas_limit` (the token transfer's L1 gas, 21,000..500,000, default 65,000; a transfer to a first-time holder costs far more under Glamsterdam's pricing, so measure it with `eth_estimateGas` and register that; USDC-GAS-1 / GLAM-1). The symbol is the token's ledger asset (the `asset` of `transfer` and the allowance actions; case-sensitive). A symbol belongs to one token, and a registered token keeps its symbol: re-registering it under the same symbol only changes the other fields.
+
+**Proving fee.** Every deposit and withdrawal needs its L1 block's header proven on Magi, which the operator buys from the Succinct Prover Network (about 0.4 PROVE a proof, several operations sharing one proof inside a 10-minute window). `setProofFee` sets, per asset (`"eth"` or a registered token's symbol), a flat fee in the asset's smallest unit, at most half the asset's smallest creditable deposit (ETH 0.0005; USDC at a 10 USDC minimum withdrawal: 0.5 USDC); `"0"` removes it, and an asset with no fee set charges nothing. The contract cannot read the PROVE price, so the owner re-sets the fee when it moves. It is paid to `hive:altera.app` as an ordinary Magi balance:
+- a deposit (`eth`, `erc20` and `contract` maps) pays it out of its credit, after the 1% ETH reserve share; a reserve deposit (`to_reserve=1`) pays none;
+- a withdrawal (`unmapETH`, `unmapERC20`, `unmapFrom`) pays it on top of its debit, and is refused when the balance (and, for `unmapFrom`, the spender's allowance) does not cover both. It is not refunded if the withdrawal is later cancelled or refunded: the request has already caused the proving.
+
+RC on the node runtime (measured on the bridge wasm): `unmapETH` ~9,400 RC, ~10,000 with the proving fee; `unmapERC20` ~12,900. Use an `rc_limit` of at least 15,000 for `unmapETH` and 20,000 for `unmapERC20`.
 
 A token withdrawal's gas is paid from the bridge's ETH gas reserve, which must hold at least 0.05 ETH (`MinGasReserve`) when it is issued; until then it waits in the queue. An ETH withdrawal pays its own gas and does not need the reserve (RP-4). A fresh bridge's reserve is 0 and grows by 1% of each ETH deposit, so seed it: an ETH deposit to the vault whose calldata is `to_reserve=1` goes wholly to the reserve.
 

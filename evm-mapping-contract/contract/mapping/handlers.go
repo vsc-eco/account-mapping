@@ -122,12 +122,16 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 			addGasReserve(gasTax)
 		}
 
+		// The proving fee comes out of the credit before routing; netAmount
+		// (credit + fee) is still the user supply this deposit adds.
+		credit := takeDepositProofFee("eth", netAmount)
+
 		// Honor the depositor-signed instructions: deposit_to redirect, or a
 		// swap_to/asset_out DEX swap. routeDeposit returns the L2 destination,
 		// or "" when it dispatched the swap (which already credited the funds).
-		dest := routeDeposit(sender, instructions, "eth", netAmount, chainId)
+		dest := routeDeposit(sender, instructions, "eth", credit, chainId)
 		if dest != "" {
-			IncBalance(dest, "eth", netAmount)
+			IncBalance(dest, "eth", credit)
 		}
 		TrackDeposit("eth", netAmount, gasTax)
 		// CRIT #8 / W4 Cluster A: lock the observed slot only after the
@@ -171,7 +175,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// require a future depositor-signed mechanism (e.g. a deposit-wrapper
 		// EVM contract that emits an instruction-bearing event).
 		dest := crypto.AddressToDID(sender)
-		IncBalance(dest, tokenInfo.Symbol, amount)
+		IncBalance(dest, tokenInfo.Symbol, takeDepositProofFee(tokenInfo.Symbol, amount))
 		TrackDeposit(tokenInfo.Symbol, amount, new(big.Int))
 		// CRIT #8 / W4 Cluster A + CRIT #14 logIndex: lock observed slot
 		// only after routing + credit succeed.
@@ -251,11 +255,15 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	} else {
 		userDebit.Add(amount, feeCap)
 	}
-	if GetBalance(caller, constants.NativeAsset).Cmp(userDebit) < 0 {
+	proofFee := ProofFee(constants.NativeAsset)
+	if GetBalance(caller, constants.NativeAsset).Cmp(new(big.Int).Add(userDebit, proofFee)) < 0 {
 		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
 	}
 	if !DecBalance(caller, constants.NativeAsset, userDebit) {
 		return "", ce.NewContractError(ce.ErrBalance, "insufficient balance")
+	}
+	if err := chargeWithdrawalProofFee(caller, constants.NativeAsset, proofFee); err != nil {
+		return "", err
 	}
 	// Custody and user supply shrink by the full debit now; the unused fee
 	// authorization is booked back at issue, a cancel books back all of it.
@@ -402,8 +410,15 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 			return "", err
 		}
 	}
+	proofFee := ProofFee(tokenInfo.Symbol)
+	if GetBalance(caller, tokenInfo.Symbol).Cmp(new(big.Int).Add(amount, proofFee)) < 0 {
+		return "", ce.NewContractError(ce.ErrBalance, "insufficient token balance")
+	}
 	if !DecBalance(caller, tokenInfo.Symbol, amount) {
 		return "", ce.NewContractError(ce.ErrBalance, "insufficient token balance")
+	}
+	if err := chargeWithdrawalProofFee(caller, tokenInfo.Symbol, proofFee); err != nil {
+		return "", err
 	}
 	// The gas comes from the shared ETH reserve at issue, priced then (RP-11);
 	// the token supply is debited by the bare amount.
@@ -1322,13 +1337,16 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		}
 		q.Asset, q.FeeCap, q.DeductFee, q.GasLimit = constants.NativeAsset, feeCap, params.DeductFee, gas
 	}
-	if GetBalance(params.From, q.Asset).Cmp(userDebit) < 0 {
+	// The proving fee is the owner's too, on top of the debit.
+	proofFee := ProofFee(q.Asset)
+	ownerDebit := new(big.Int).Add(userDebit, proofFee)
+	if GetBalance(params.From, q.Asset).Cmp(ownerDebit) < 0 {
 		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
 	}
 	// The spender's authorization must cover the FULL owner debit (value +
-	// fee authorization), same as the BTC baseline.
+	// fee authorization + proving fee), same as the BTC baseline.
 	allowance := GetAllowance(params.From, caller, q.Asset)
-	if allowance.Cmp(userDebit) < 0 {
+	if allowance.Cmp(ownerDebit) < 0 {
 		return ce.NewContractError(ce.ErrBalance, "insufficient allowance for amount plus fee")
 	}
 
@@ -1336,7 +1354,10 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 	if !DecBalance(params.From, q.Asset, userDebit) {
 		return ce.NewContractError(ce.ErrBalance, "insufficient balance in owner account")
 	}
-	SetAllowance(params.From, caller, q.Asset, new(big.Int).Sub(allowance, userDebit))
+	if err := chargeWithdrawalProofFee(params.From, q.Asset, proofFee); err != nil {
+		return err
+	}
+	SetAllowance(params.From, caller, q.Asset, new(big.Int).Sub(allowance, ownerDebit))
 	TrackWithdrawal(q.Asset, userDebit)
 	q.Debit = userDebit
 	*status, err = submitWithdrawal(q, vaultAddress, chainId)

@@ -187,7 +187,7 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		if gasTax.Sign() > 0 {
 			addGasReserve(gasTax)
 		}
-		IncBalance(dest, constants.NativeAsset, net)
+		IncBalance(dest, constants.NativeAsset, takeDepositProofFee(constants.NativeAsset, net))
 		TrackDeposit(constants.NativeAsset, net, gasTax)
 	} else {
 		info := getTokenInfo(chainId, d.token)
@@ -204,7 +204,7 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		if IsObserved(req.BlockHeight, txHash, uint16(j)) {
 			return ErrAlreadyObserved
 		}
-		IncBalance(dest, info.Symbol, d.amount)
+		IncBalance(dest, info.Symbol, takeDepositProofFee(info.Symbol, d.amount))
 		TrackDeposit(info.Symbol, d.amount, new(big.Int))
 		MarkObserved(req.BlockHeight, txHash, uint16(j))
 	}

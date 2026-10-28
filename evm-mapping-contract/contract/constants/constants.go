@@ -152,6 +152,15 @@ const ERC20TransferGas = uint64(65_000)
 const MaxETHGasLimit uint64 = 1_000_000
 const ETHGasLimitKey = "egl"
 
+// Proving fee. Every deposit and withdrawal needs an L1 header proven on Magi,
+// which the operator buys from the Prover Network. ProofFeePrefix + asset holds
+// that asset's fee in its smallest unit (unset: no fee), set by the owner
+// (setProofFee, operational timelock) since the contract cannot read the PROVE
+// price. A deposit pays it out of its credit, a withdrawal on top of its debit;
+// it goes to ProofFeeRecipient as an ordinary Magi balance.
+const ProofFeePrefix = "pf-"
+const ProofFeeRecipient = "hive:altera.app"
+
 // Minimum withdrawal amounts (in token-native units).
 // big.Int/wei migration: native ETH accounting is now full wei (18 decimals),
 // no gwei scaling. These thresholds are bounded config values (well within
