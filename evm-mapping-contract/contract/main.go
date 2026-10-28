@@ -633,6 +633,13 @@ func dispatchAdmin(action string, payload []byte) {
 		if p.GasLimit != 0 && (p.GasLimit < constants.MinTokenGasLimit || p.GasLimit > constants.MaxTokenGasLimit) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: gas_limit out of range"))
 		}
+		// The token's proving fee stays at most half its minimum deposit, as
+		// setProofFee requires: otherwise raising min_withdrawal, setting a
+		// large fee and lowering it again would let the fee take whole deposits.
+		newFloor := big.NewInt((&mapping.TokenInfo{MinWithdrawal: effMin}).MinDeposit())
+		if mapping.ProofFee(p.Symbol).Cmp(mapping.MaxProofFee(newFloor)) > 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal would put the proving fee above half the minimum deposit; lower the fee first"))
+		}
 		if err := mapping.RegisterTokenFull(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal, p.RevertFee, p.GasLimit); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: "+err.Error()))
 		}
