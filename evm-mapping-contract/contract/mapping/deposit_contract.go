@@ -179,6 +179,9 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		dest = d.recipient
 	}
 	if d.token == ([20]byte{}) {
+		if err := checkMinDeposit(constants.NativeAsset, d.amount, constants.MinETHDeposit); err != nil {
+			return err
+		}
 		gasTax := new(big.Int).Div(new(big.Int).Mul(d.amount, big.NewInt(constants.GasReserveDepositTaxBps)), big.NewInt(10000))
 		net := new(big.Int).Sub(d.amount, gasTax)
 		if gasTax.Sign() > 0 {
@@ -190,6 +193,9 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		info := getTokenInfo(chainId, d.token)
 		if info == nil {
 			return ErrInvalidToken
+		}
+		if err := checkMinDeposit(info.Symbol, d.amount, info.MinDeposit()); err != nil {
+			return err
 		}
 		j := pairedTransfer(logs, int(req.LogIndex), d, vault)
 		if j < 0 {

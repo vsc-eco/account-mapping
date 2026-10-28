@@ -167,6 +167,16 @@ const MaxPricingHeaderAge uint64 = 3600
 const MinETHWithdrawal = int64(10_000_000_000_000_000) // 0.01 ETH in WEI
 const MinUSDCWithdrawal = int64(10_000_000)            // 10 USDC in micro-units
 
+// DUST-1: a deposit below a tenth of its asset's minimum withdrawal is never
+// credited: map refuses it and it stays in the vault, as the BTC mapping
+// contract never credits an output under MinDepositSats (1,000 sats, THORChain's
+// BTC dust threshold, ~$1). Each mapped deposit costs the bridge an L2 call, its
+// block's header and possibly a paid proof, and without a floor a 1-wei
+// deposit was credited. ETH: 0.001 ETH; a token: its min_withdrawal / 10 (USDC
+// at 10 USDC: 1 USDC). The bot does not map one either.
+const MinDepositDivisor = 10
+const MinETHDeposit = MinETHWithdrawal / MinDepositDivisor // 0.001 ETH in WEI
+
 // Gas reserve
 const GasReserveDepositTaxBps = int64(100) // 1% of ETH deposits go to gas reserve
 // big.Int/wei migration: the reserve accumulator (GasReserveKey) is denominated

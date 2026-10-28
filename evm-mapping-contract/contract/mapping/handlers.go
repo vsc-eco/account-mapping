@@ -88,6 +88,9 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		if amount.Sign() <= 0 {
 			return ce.NewContractError(ce.ErrInput, "deposit amount must be positive")
 		}
+		if err := checkMinDeposit(constants.NativeAsset, amount, constants.MinETHDeposit); err != nil {
+			return err
+		}
 
 		// review6 follow-up: native-ETH routing intent is read from the PROVEN
 		// L1 calldata (parsedTx.Data), which the depositor signed over — NOT
@@ -156,6 +159,9 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		if amount.Sign() <= 0 {
 			return ce.NewContractError(ce.ErrArithmetic, "deposit amount invalid")
 		}
+		if err := checkMinDeposit(tokenInfo.Symbol, amount, tokenInfo.MinDeposit()); err != nil {
+			return err
+		}
 
 		// review6 follow-up: ERC-20 deposits settle ONLY to the sender's derived
 		// Magi account. A standard ERC-20 transfer exposes no depositor-signed
@@ -178,6 +184,16 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 	default:
 		return ce.NewContractError(ce.ErrInput, "deposit_type must be 'eth', 'erc20' or 'contract'")
 	}
+}
+
+// checkMinDeposit refuses a deposit below its asset's floor (DUST-1): it is
+// not credited and stays in the vault.
+func checkMinDeposit(asset string, amount *big.Int, min int64) error {
+	if amount.Cmp(big.NewInt(min)) < 0 {
+		return ce.NewContractError(ce.ErrInput, "deposit of "+amount.String()+" "+asset+
+			" is below the minimum "+strconv.FormatInt(min, 10)+": not credited")
+	}
+	return nil
 }
 
 func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {

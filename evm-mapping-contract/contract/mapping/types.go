@@ -1,6 +1,9 @@
 package mapping
 
-import "math/big"
+import (
+	"evm-mapping-contract/contract/constants"
+	"math/big"
+)
 
 type MapParams struct {
 	TxData       VerificationRequest `json:"tx_data"`
@@ -61,6 +64,10 @@ type TokenInfo struct {
 	RevertFee     int64  `json:"revert_fee"`
 	GasLimit      uint64 `json:"gas_limit"`
 }
+
+// MinDeposit is the smallest deposit of the token that is credited (DUST-1):
+// a tenth of its minimum withdrawal.
+func (t *TokenInfo) MinDeposit() int64 { return t.MinWithdrawal / constants.MinDepositDivisor }
 
 // ConfirmSpendRequest carries both tx and receipt proofs for withdrawal
 // confirmation. W4 Cluster E CRIT #5 + HIGH #13 (D-E-1 + D-E-2 LOCKED): the
