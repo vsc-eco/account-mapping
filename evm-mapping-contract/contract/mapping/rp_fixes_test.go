@@ -339,7 +339,7 @@ func TestRP11_HeadWalkIsBounded(t *testing.T) {
 	for seq := uint64(1); seq < 200; seq++ { // everything behind the head goes first
 		sdk.StateDeleteObject(queueKey(seq))
 	}
-	RemoveQueued(0)
+	RemoveQueued(0, GetQueued(0))
 	if head, _ := QueueBounds(); head != constants.MaxQueueWalk {
 		t.Fatalf("head %d after one removal, want %d (bounded walk)", head, constants.MaxQueueWalk)
 	}

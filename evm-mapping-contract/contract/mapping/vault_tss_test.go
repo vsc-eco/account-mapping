@@ -64,35 +64,42 @@ func TestA18_VaultIsTheTssKeysAddress(t *testing.T) {
 	sdk.ResetStubState()
 }
 
-// The address is cached per public key; a new key (rotation) gets its own
-// address, never the cached one.
+// The address is cached per generation and public key; a new generation (a
+// rotation, A01) gets its own address, never a cached one.
 func TestA18_VaultCacheIsPerKey(t *testing.T) {
 	sdk.ResetStubState()
+	sdk.StubClearTssKeys()
 	defer sdk.ResetStubState()
 	sdk.StubSetTssKey("active," + tssPubG + ",ecdsa")
 	verifyVault(tssPubG)
 	if got, _ := vaultHex(t); !strings.EqualFold(got, tssAddrG) {
 		t.Fatalf("vault %s, want %s", got, tssAddrG)
 	}
-	if c := sdk.StateGetObject(constants.VaultKeyCacheKey); c == nil || !strings.EqualFold(*c, tssPubG+"|"+tssAddrG) {
+	cacheKey := constants.VaultAddrCachePrefix + "0"
+	if c := sdk.StateGetObject(cacheKey); c == nil || !strings.EqualFold(*c, tssPubG+"|"+tssAddrG) {
 		t.Fatalf("cache = %v, want %s|%s", c, tssPubG, tssAddrG)
 	}
 	// The cache is read: a planted entry for the same key is what comes back.
-	sdk.StateSetObject(constants.VaultKeyCacheKey, tssPubG+"|0x00000000000000000000000000000000000000c1")
+	sdk.StateSetObject(cacheKey, tssPubG+"|0x00000000000000000000000000000000000000c1")
 	if got, _ := vaultHex(t); got != "0x00000000000000000000000000000000000000c1" {
 		t.Fatalf("vault %s, want the cached address", got)
 	}
-	// A different key has no vault until it too is verified (E23), then
-	// ignores the entry and replaces it.
-	sdk.StubSetTssKey("active," + tssPubTwo + ",ecdsa")
-	if got, ok := vaultHex(t); ok {
-		t.Fatalf("a new key before its check signature: vault %s, want none", got)
+	// A rotation to a new generation's key: no vault move until it activates,
+	// then the new generation's own address and cache entry.
+	if _, _, err := MintNextGeneration(10); err != nil {
+		t.Fatal(err)
 	}
-	verifyVault(tssPubTwo)
+	sdk.StubSetTssKeyFor("primaryv1", "active,"+tssPubTwo+",ecdsa,1,1")
+	if got, _ := vaultHex(t); got != "0x00000000000000000000000000000000000000c1" {
+		t.Fatalf("a pending generation moved the vault to %s", got)
+	}
+	if _, _, _, err := ActivatePendingGeneration(11); err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := vaultHex(t); !strings.EqualFold(got, tssAddrTwo) {
 		t.Fatalf("after rotation vault %s, want %s", got, tssAddrTwo)
 	}
-	if c := sdk.StateGetObject(constants.VaultKeyCacheKey); c == nil || !strings.HasPrefix(*c, tssPubTwo+"|") {
+	if c := sdk.StateGetObject(constants.VaultAddrCachePrefix + "1"); c == nil || !strings.HasPrefix(*c, tssPubTwo+"|") {
 		t.Fatalf("cache after rotation = %v", c)
 	}
 }

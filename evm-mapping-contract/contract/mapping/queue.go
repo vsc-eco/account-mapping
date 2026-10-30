@@ -128,7 +128,7 @@ func drainWith(chainId uint64, vault [20]byte, max int) int {
 		scanned++
 		switch out, why := issueQueued(q, vault, chainId, header); out {
 		case queueIssued:
-			RemoveQueued(seq)
+			RemoveQueued(seq, q)
 			issued++
 		case queueRefund:
 			refundQueued(seq, q, why)
@@ -149,7 +149,7 @@ const (
 func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
 	IncBalance(q.From, q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
-	RemoveQueued(seq)
+	RemoveQueued(seq, q)
 	sdk.Log("unmapq|refund|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|why=" + why)
 }
 
@@ -236,7 +236,7 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		userCost.Set(q.Amount)
 	}
 	ps.UnsignedTxHex = hex.EncodeToString(unsigned)
-	sdk.TssSignKey("primary", ComputeSighash(unsigned))
+	sdk.TssSignKey(ActiveKeyName(), ComputeSighash(unsigned))
 	StorePendingSpend(ps)
 	logUnmap(ps, userCost, q.Asset == constants.NativeAsset)
 	SetPendingNonce(nonce + 1)
@@ -266,7 +266,7 @@ func HandleCancelQueuedWithdrawal(seq uint64) error {
 	}
 	IncBalance(q.From, q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
-	RemoveQueued(seq)
+	RemoveQueued(seq, q)
 	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|by=" + caller)
 	return nil
 }

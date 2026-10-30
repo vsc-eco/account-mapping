@@ -165,9 +165,132 @@ func initContract(input *string) *string {
 	return nil
 }
 
-// createPrimaryKey requests the bridge's TSS key, whose address is the vault
-// (A18).
-func createPrimaryKey() { sdk.TssCreateKey("primary", "ecdsa", 365) }
+// createPrimaryKey mints the next vault generation and requests its TSS key,
+// whose address becomes the vault once the generation activates (A18, A01). On
+// a fresh bridge that is generation 0, the "primary" key.
+func createPrimaryKey() string {
+	gen, name, err := mapping.MintNextGeneration(mapping.L1Height())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	sdk.TssCreateKey(name, "ecdsa", 365)
+	return "minted generation " + strconv.FormatUint(uint64(gen), 10) + ", key " + name + " (awaiting keygen)"
+}
+
+// renewVaultKeys renews every fund-holding generation's key that can be
+// renewed, so a retiring generation's key cannot expire while it still holds
+// funds (BTC D-2). A key that cannot be renewed is reported, not fatal.
+func renewVaultKeys() string {
+	names, skipped, err := mapping.RenewableVaultKeyNames()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	for _, n := range names {
+		sdk.TssRenewKey(n, 365)
+	}
+	out := "renewed keys: " + strings.Join(names, ",")
+	if len(skipped) > 0 {
+		sdk.Log("warn|renew-skipped|" + strings.Join(skipped, " "))
+		out += "; skipped (unrenewable, fund-holding): " + strings.Join(skipped, " ")
+	}
+	return out
+}
+
+// checkOperator admits the owner or the appointed vault operator: the
+// operational rotation ops an off-chain driver (the bot) calls. Mirrors the BTC
+// contract.
+func checkOperator() {
+	caller := sdk.GetEnv().Caller.String()
+	if owner := sdk.GetEnvKey("contract.owner"); owner != nil && caller == *owner {
+		return
+	}
+	if op := sdk.StateGetObject(constants.VaultOperatorKey); op != nil && *op != "" && caller == *op {
+		return
+	}
+	ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "action must be performed by the contract owner or the vault operator"))
+}
+
+// A01 rotation ceremony, owner-only and direct like the BTC contract's: the
+// owner can trigger a rotation but not choose its key (activation needs the
+// TSS ceremony's key, its verified check signature and a reshare), so a
+// timelock would add delay and no safety. Not pause-gated: a rotation is the
+// answer to a suspected key compromise.
+
+//go:wasmexport createKey
+func createKey(_ *string) *string {
+	checkOwner()
+	// NN#3: no new generation while a superseded one still holds funds.
+	funded, err := mapping.AnyFundedSupersededGen()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	if funded {
+		ce.CustomAbort(ce.NewContractError(ce.ErrTransaction,
+			"cannot create a new key while a superseded generation still holds funds; drain it (migrateVault) first (NN#3)"))
+	}
+	out := createPrimaryKey()
+	return &out
+}
+
+//go:wasmexport activateKey
+func activateKey(_ *string) *string {
+	checkOwner()
+	activated, retired, had, err := mapping.ActivatePendingGeneration(mapping.L1Height())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	out := "activated generation " + strconv.FormatUint(uint64(activated), 10)
+	if had {
+		out += "; generation " + strconv.FormatUint(uint64(retired), 10) + " now retiring"
+	}
+	sdk.Log("vaultactivate|g=" + strconv.FormatUint(uint64(activated), 10))
+	return &out
+}
+
+//go:wasmexport discardPendingKey
+func discardPendingKey(_ *string) *string {
+	checkOwner()
+	gen, err := mapping.DiscardPendingGeneration()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	out := "discarded pending generation " + strconv.FormatUint(uint64(gen), 10)
+	return &out
+}
+
+//go:wasmexport renewKey
+func renewKey(_ *string) *string {
+	checkOwner()
+	out := renewVaultKeys()
+	return &out
+}
+
+// setVaultOperator appoints (or, with an empty input, removes) the account that
+// may call the operational rotation ops besides the owner.
+//
+//go:wasmexport setVaultOperator
+func setVaultOperator(input *string) *string {
+	checkOwner()
+	op := ""
+	if input != nil {
+		op = strings.TrimSpace(*input)
+	}
+	if op == "" {
+		sdk.StateDeleteObject(constants.VaultOperatorKey)
+		return nil
+	}
+	if sdk.VerifyAddress(op) == string(sdk.AddressDomainUnknown) {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVaultOperator: invalid account \""+op+"\""))
+	}
+	sdk.StateSetObject(constants.VaultOperatorKey, op)
+	return nil
+}
+
+//go:wasmexport vaultInfo
+func vaultInfo(_ *string) *string {
+	out := mapping.VaultInfoJSON()
+	return &out
+}
 
 // -----------------------------------------------------------------------------
 // User-facing wasmexports (NOT admin — no propose/execute wrapping)
@@ -555,15 +678,21 @@ func dispatchAdmin(action string, payload []byte) {
 		sdk.StateSetObject(constants.VerifierContractIdKey, p.ContractId)
 
 	case "createKey":
-		assertNotPaused()
+		// Kept for the timelocked path; the direct createKey export is the same
+		// mint, behind the same NN#3 gate.
+		if funded, err := mapping.AnyFundedSupersededGen(); err != nil || funded {
+			ce.CustomAbort(ce.NewContractError(ce.ErrTransaction,
+				"cannot create a new key while a superseded generation still holds funds (NN#3)"))
+		}
 		createPrimaryKey()
 
 	case "renewKey":
 		// CRIT #17 flag 1 / W4 Cluster F D-F-1: TssRenewKey extends
 		// ExpiryEpoch (NOT TssCreateKey, which would be a no-op).
 		// D7: allowed while paused: a pause that outlasts the key's expiry
-		// window must not retire the key that holds every deposit.
-		sdk.TssRenewKey("primary", 365)
+		// window must not retire the key that holds every deposit. A01: every
+		// fund-holding generation's key.
+		renewVaultKeys()
 
 	// Operator-tactical (28.8K blocks, 24h)
 	// registerPublicKey was removed (A18): it stored a public key nothing read;

@@ -205,8 +205,28 @@ var stubTssKey *string
 // StubSetTssKey sets the tss.get_key response. Test-only.
 func StubSetTssKey(info string) { stubTssKey = &info }
 
+// stubTssKeys answers tss.get_key per key name, ahead of stubTssKey, for tests
+// that hold several vault generations. Test-only.
+var stubTssKeys = map[string]string{}
+
+// StubSetTssKeyFor sets the tss.get_key response for one key name. Test-only.
+func StubSetTssKeyFor(keyId, info string) { stubTssKeys[keyId] = info }
+
+// StubClearTssKeys forgets every tss.get_key response: each key then reads as
+// missing (""), as the host answers for a key it does not know. Test-only.
+func StubClearTssKeys() { stubTssKeys = map[string]string{}; stubTssKey = nil }
+
 //go:wasmimport sdk tss.get_key
-func tssGetKey(keyId *string) *string { return stubTssKey }
+func tssGetKey(keyId *string) *string {
+	if v, ok := stubTssKeys[*keyId]; ok {
+		return &v
+	}
+	if stubTssKey != nil {
+		return stubTssKey
+	}
+	none := ""
+	return &none
+}
 
 // var envMap = []string{
 // 	"contract.id",
@@ -283,6 +303,7 @@ func ResetTestState() {
 	testCreatedKeys = nil
 	testSignRequests = nil
 	testRenewedKeys = nil
+	stubTssKeys = map[string]string{}
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}

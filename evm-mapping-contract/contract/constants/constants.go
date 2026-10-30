@@ -262,3 +262,68 @@ const (
 	MinTokenGasLimit uint64 = 21_000
 	MaxTokenGasLimit uint64 = 500_000
 )
+
+// A01: vault generations (rolling keys), mirroring the BTC mapping contract's
+// vault rotation. The registry and its counters use the BTC contract's keys and
+// layout, so the node reads both contracts with the same decoder.
+const (
+	// VaultKeyBaseName is generation 0's TSS key name (the bridge's original key);
+	// generation N is VaultKeyBaseName + "v" + N.
+	VaultKeyBaseName = "primary"
+
+	VaultRegistryKey  = "v"  // packed 91-byte entries (whole list)
+	VaultNextGenKey   = "vn" // 4-byte BE: next generation number to mint
+	VaultActiveGenKey = "va" // 4-byte BE: generation receiving deposits
+
+	// VaultAddrCachePrefix caches a generation's L1 address: vac-{gen} → "<pubkey hex>|<0x address>".
+	VaultAddrCachePrefix = "vac" + DirPathDelimiter
+
+	// VaultBookPrefix is what a SUPERSEDED generation's address holds, per asset:
+	// vb-{gen}-{asset} → wei / token units. The active generation's share is
+	// derived (custody minus the superseded books), so it needs no key.
+	VaultBookPrefix = "vb" + DirPathDelimiter
+
+	// VaultOperatorKey names an optional second account allowed the operational
+	// rotation ops (migrateVault, retireVault, writeOffDust, redriveSweep), as in
+	// the BTC contract. The owner may always call them.
+	VaultOperatorKey = "vaultop"
+)
+
+// VaultPurgeGraceL1Blocks is how long an emptied (Inactive) generation stays
+// deposit-matchable before it may be purged: about 30 days of 12 s Ethereum
+// blocks on mainnet, a few minutes elsewhere. A late deposit inside the window
+// returns the generation to Draining.
+func VaultPurgeGraceL1Blocks(chainId uint64) uint32 {
+	if chainId == 1 {
+		return 216_000
+	}
+	return VaultPurgeReorgL1Blocks
+}
+
+// VaultPurgeReorgL1Blocks is the margin a generation stays empty after its last
+// emptying before a purge (BTC PURGE-GRIEF-1).
+const VaultPurgeReorgL1Blocks uint32 = 64
+
+// TokenSymbolsKey lists every registered token symbol, '|'-joined, so a vault
+// rotation can book each asset a retiring generation holds (A01).
+const TokenSymbolsKey = "tsyms"
+
+// QueuedDebitPrefix is the sum of the queued (not yet issued) withdrawals'
+// debits per asset: wqd-{asset}. The funds are still at the vault, so a
+// rotation books them to the retiring generation. QueuedDebitExactKey is "1"
+// once the counters have been exact since an empty queue (a queue left from
+// before the counters existed is not counted, and a rotation waits for it).
+const (
+	QueuedDebitPrefix   = "wqd" + DirPathDelimiter
+	QueuedDebitExactKey = "wqdx"
+)
+
+// Migration sweeps (A01): ms-{gen}-{nonce} → JSON sweep record; MigrationSweepsKey
+// lists the open ones ("{gen}-{nonce}", '|'-joined), which the node scans to
+// scope a retiring key's signatures; msn-{gen} is the next L1 nonce of a
+// retiring generation.
+const (
+	MigrationSweepPrefix = "ms" + DirPathDelimiter
+	MigrationSweepsKey   = "msr"
+	SweepNoncePrefix     = "msn" + DirPathDelimiter
+)

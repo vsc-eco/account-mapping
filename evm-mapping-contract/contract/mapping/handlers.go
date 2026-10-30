@@ -1077,6 +1077,7 @@ func RegisterTokenFull(chainId uint64, addr [20]byte, symbol string, decimals ui
 	// transfer/approve/unmapFrom can reject any other free-form asset string.
 	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
 	sdk.StateSetObject(constants.TokenSymbolPrefix+symbol, ref)
+	indexTokenSymbol(symbol) // A01: a rotation books every registered asset
 	return nil
 }
 
@@ -1153,32 +1154,18 @@ func checkAuth(env sdk.Env) error {
 // signing still needs the key active (requireTssKey). The address is cached per
 // public key so the curve math runs once.
 func TssVaultAddress() ([20]byte, bool) {
-	pubHex, ok := primaryKeyPub(false)
-	// E23: no vault until the key has shown it can sign (vaultcheck.go).
-	if !ok || !vaultVerified(pubHex) {
+	// A01: the vault is the ACTIVE generation's address. A pre-rotation
+	// contract's "primary" key folds into generation 0 (Active once it has
+	// passed the vault check, so the address is the one it always was).
+	v, ok := ActiveVault()
+	if !ok {
 		return [20]byte{}, false
 	}
-	if c := sdk.StateGetObject(constants.VaultKeyCacheKey); c != nil {
-		if i := strings.IndexByte(*c, '|'); i > 0 && (*c)[:i] == pubHex {
-			if addr, err := crypto.HexToAddress((*c)[i+1:]); err == nil {
-				return addr, true
-			}
-		}
-	}
-	pub, err := hex.DecodeString(pubHex)
-	if err != nil {
-		return [20]byte{}, false
-	}
-	addr, err := crypto.PubkeyAddress(pub)
-	if err != nil {
-		return [20]byte{}, false
-	}
-	sdk.StateSetObject(constants.VaultKeyCacheKey, pubHex+"|"+crypto.AddressToHex(addr))
-	return addr, true
+	return GenAddress(&v)
 }
 
 func requireTssKey() error {
-	keyInfo := sdk.TssGetKey("primary")
+	keyInfo := sdk.TssGetKey(ActiveKeyName())
 	if keyInfo == "" || keyInfo == "fail" {
 		return ce.NewContractError(ce.ErrAuth, "TSS key not available")
 	}
@@ -1510,7 +1497,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	}
 
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey("primary", sighash)
+	sdk.TssSignKey(ActiveKeyName(), sighash)
 
 	// MED-33 (M23-F16): record the block of this successful replace so the
 	// cooldown gate above can rate-limit the next one. round3 C-SM3: written
@@ -1594,7 +1581,7 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 		big.NewInt(0),
 	)
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey("primary", sighash)
+	sdk.TssSignKey(ActiveKeyName(), sighash)
 
 	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
 	// big.Int refundDroppedWithdrawal cannot overflow, so it subsumes 30710e4's
@@ -1727,7 +1714,7 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 	// TSS-sign self-transfer to roll the L1 vault nonce.
 	unsigned := BuildETHWithdrawalTx(chainId, nonce, 4_000_000_000, 100_000_000_000, vaultAddress, big.NewInt(0))
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey("primary", sighash)
+	sdk.TssSignKey(ActiveKeyName(), sighash)
 
 	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
 	// big.Int refundDroppedWithdrawal cannot overflow (subsumes 30710e4's int64
@@ -1804,7 +1791,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 		return ce.NewContractError(ce.ErrArithmetic, "gas fee cap overflow", "rollWithdrawal")
 	}
 	unsigned := BuildETHWithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, snapshottedVault, big.NewInt(0))
-	sdk.TssSignKey("primary", ComputeSighash(unsigned))
+	sdk.TssSignKey(ActiveKeyName(), ComputeSighash(unsigned))
 	sdk.StateSetObject(cooldownKey, strconv.FormatUint(env.BlockHeight, 10))
 	ps.Rolled = true
 	ps.UnsignedTxHex = hex.EncodeToString(unsigned)

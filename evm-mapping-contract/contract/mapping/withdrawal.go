@@ -355,6 +355,9 @@ func queueKey(seq uint64) string {
 
 // Enqueue stores q at the tail and returns its seq.
 func Enqueue(q QueuedWithdrawal) uint64 {
+	if QueueLen() == 0 {
+		resetQueuedDebits()
+	}
 	_, tail := QueueBounds()
 	q.Seq = tail
 	b, err := json.Marshal(q)
@@ -363,7 +366,58 @@ func Enqueue(q QueuedWithdrawal) uint64 {
 	}
 	sdk.StateSetObject(queueKey(tail), string(b))
 	sdk.StateSetObject(constants.WithdrawQueueTailKey, strconv.FormatUint(tail+1, 10))
+	if queuedDebitExact() && q.Debit != nil {
+		addQueuedDebit(q.Asset, q.Debit)
+	}
 	return tail
+}
+
+// A01: the queued withdrawals' debits per asset. They were taken out of the
+// custody (TrackWithdrawal) when requested, but the funds are still at the
+// vault until the withdrawal is issued, so a rotation books them to the
+// retiring generation (retireActiveGeneration).
+
+func queuedDebitKey(asset string) string { return constants.QueuedDebitPrefix + asset }
+
+// QueuedDebit is the sum of the queued withdrawals' debits in asset.
+func QueuedDebit(asset string) *big.Int {
+	if QueueLen() == 0 {
+		return new(big.Int)
+	}
+	if s := sdk.StateGetObject(queuedDebitKey(asset)); s != nil {
+		return parseAmount(*s)
+	}
+	return new(big.Int)
+}
+
+// queuedDebitExact reports whether the counters cover every queued entry: they
+// have been kept since the queue was last empty.
+func queuedDebitExact() bool {
+	if QueueLen() == 0 {
+		return true
+	}
+	m := sdk.StateGetObject(constants.QueuedDebitExactKey)
+	return m != nil && *m == "1"
+}
+
+func addQueuedDebit(asset string, delta *big.Int) {
+	v := new(big.Int).Add(QueuedDebit(asset), delta)
+	if v.Sign() < 0 {
+		sdk.Abort("queued debit underflow: " + asset)
+	}
+	if v.Sign() == 0 {
+		sdk.StateDeleteObject(queuedDebitKey(asset))
+		return
+	}
+	sdk.StateSetObject(queuedDebitKey(asset), v.String())
+}
+
+// resetQueuedDebits zeroes the counters of an empty queue and marks them exact.
+func resetQueuedDebits() {
+	for _, a := range vaultAssets() {
+		sdk.StateDeleteObject(queuedDebitKey(a))
+	}
+	sdk.StateSetObject(constants.QueuedDebitExactKey, "1")
 }
 
 func GetQueued(seq uint64) *QueuedWithdrawal {
@@ -378,9 +432,14 @@ func GetQueued(seq uint64) *QueuedWithdrawal {
 	return &q
 }
 
-// RemoveQueued deletes entry seq and advances the head past removed entries.
-func RemoveQueued(seq uint64) {
+// RemoveQueued deletes entry seq (q, as the caller read it) and advances the
+// head past removed entries.
+func RemoveQueued(seq uint64, q *QueuedWithdrawal) {
+	exact := queuedDebitExact()
 	sdk.StateDeleteObject(queueKey(seq))
+	if exact && q != nil && q.Debit != nil {
+		addQueuedDebit(q.Asset, new(big.Int).Neg(q.Debit))
+	}
 	advanceQueueHead()
 }
 
@@ -398,5 +457,8 @@ func advanceQueueHead() {
 	}
 	if head != start {
 		sdk.StateSetObject(constants.WithdrawQueueHeadKey, strconv.FormatUint(head, 10))
+	}
+	if head >= tail {
+		resetQueuedDebits()
 	}
 }
