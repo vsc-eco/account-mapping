@@ -264,6 +264,9 @@ func ActivatePendingGeneration(height uint32) (uint32, uint32, bool, error) {
 			"invariant violation: expected exactly one active vault after activation")
 	}
 	SaveVaultState(vaults, nextGen, activeGen)
+	// Derive and cache the new address now, in the owner's call: otherwise the
+	// first deposit or withdrawal to read it pays the derivation (~2k RC).
+	GenAddress(v)
 	return v.Generation, retiredGen, hadPredecessor, nil
 }
 
@@ -375,9 +378,13 @@ func DiscardPendingGeneration() (uint32, error) {
 	return gen, nil
 }
 
-// RenewableVaultKeyNames lists the key of every fund-holding generation that can
-// be renewed without aborting (status active or deprecated, BTC R3-1), and the
-// fund-holding ones that cannot (so the caller can warn).
+// RenewableVaultKeyNames lists the key of every fund-holding or pending
+// generation that can be renewed without aborting (status active or
+// deprecated, BTC R3-1), and the fund-holding ones that cannot (so the caller
+// can warn). A pending generation's key is renewed too: an unattested genesis
+// key (folded pending) was always renewed, and a rotation's key must not
+// expire while it waits for its check signature and reshare. One whose keygen
+// has not finished yet is not reported.
 func RenewableVaultKeyNames() (renewable, skipped []string, err error) {
 	FoldLegacyKeyIfNeeded(true)
 	vaults, _, _, lerr := LoadVaultState()
@@ -392,13 +399,14 @@ func RenewableVaultKeyNames() (renewable, skipped []string, err error) {
 		return nil, nil, nil
 	}
 	for i := range vaults {
-		if !isFundHoldingStatus(vaults[i].Status) {
+		pending := vaults[i].Status == VaultStatusPending
+		if !isFundHoldingStatus(vaults[i].Status) && !pending {
 			continue
 		}
 		name := VaultKeyName(vaults[i].Generation)
 		if p := tssKeyParts(name); p[0] == "active" || p[0] == "deprecated" {
 			renewable = append(renewable, name)
-		} else {
+		} else if !pending {
 			skipped = append(skipped, name)
 		}
 	}

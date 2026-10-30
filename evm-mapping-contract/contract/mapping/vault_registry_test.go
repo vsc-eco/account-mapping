@@ -169,3 +169,16 @@ func TestA01_GenAddressAndFundHoldingSet(t *testing.T) {
 		t.Fatal("zero key has an address")
 	}
 }
+
+// The registry memo hands each caller its own copy: one that changes what it
+// read and then neither saves nor aborts cannot change what the next reader
+// in the same call sees.
+func TestA01_RegistryMemoIsCopied(t *testing.T) {
+	sdk.ResetTestState()
+	SaveVaultState(VaultRegistry{{Generation: 0, Primary: pubOf(t, testPub1), Status: VaultStatusActive}}, 1, 0)
+	v, _, _, _ := LoadVaultState()
+	v[0].Status = VaultStatusPurged
+	if again, _, _, _ := LoadVaultState(); again[0].Status != VaultStatusActive {
+		t.Fatalf("status %v after a reader changed its copy", again[0].Status)
+	}
+}

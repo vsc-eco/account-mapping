@@ -296,9 +296,20 @@ func revert(msg, symbol *string) {
 
 // ---- review2 test harness helpers (non-wasm / !gc.custom build only) ----
 
+// testResetHooks clear per-call caches a contract keeps in package
+// variables: in wasm every call starts a fresh instance, here tests share
+// one process.
+var testResetHooks []func()
+
+// OnTestReset registers f to run on every ResetTestState.
+func OnTestReset(f func()) { testResetHooks = append(testResetHooks, f) }
+
 // ResetTestState clears in-memory contract state and restores the
 // default env. Call at the start of every stateful test.
 func ResetTestState() {
+	for _, f := range testResetHooks {
+		f()
+	}
 	testLogs = nil
 	testCreatedKeys = nil
 	testSignRequests = nil

@@ -104,17 +104,23 @@ func HandleAttestVault(sigHex string, chainId uint64) error {
 // key) once attestVault has verified its check signature, as the BTC contract's
 // genesis vault activates as soon as its key is proven (A01). A rotation's
 // generations activate only through activateKey. A failure leaves generation 0
-// pending for activateKey to retry; the attestation itself stands.
+// pending for activateKey to retry; the attestation itself stands. Otherwise
+// the active generation is read now (ActiveVault folds a checked key not yet
+// in the registry) and its address cached, so the first deposit does not pay
+// for either (~2k RC).
 func activateCheckedGenesis() {
 	vaults, _, _, err := LoadVaultState()
 	if err != nil {
 		return
 	}
 	i := firstVaultWithStatus(vaults, VaultStatusPending)
-	if i < 0 || vaults[i].Generation != 0 || !isGenesisVault(&vaults[i]) {
+	if i >= 0 && vaults[i].Generation == 0 && isGenesisVault(&vaults[i]) {
+		if _, _, _, err := ActivatePendingGeneration(L1Height()); err != nil {
+			sdk.Log("vault|genesis-pending|" + err.Error())
+		}
 		return
 	}
-	if _, _, _, err := ActivatePendingGeneration(L1Height()); err != nil {
-		sdk.Log("vault|genesis-pending|" + err.Error())
+	if v, ok := ActiveVault(); ok {
+		GenAddress(&v)
 	}
 }

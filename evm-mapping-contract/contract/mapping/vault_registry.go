@@ -115,8 +115,30 @@ func stateBytes(key string) []byte {
 	return nil
 }
 
-// LoadVaultState reads the registry and its two counters.
+// vaultStateMemo is the registry as this call last read or wrote it. A
+// contract call runs in a fresh wasm instance and every write goes through
+// SaveVaultState, so it is never stale; it spares the re-reads one withdrawal
+// makes (active key, vault address, issuance gate, availability: ~700 RC).
+// Native tests clear it with the SDK's test state.
+var vaultStateMemo *vaultStateSnap
+
+type vaultStateSnap struct {
+	vaults       VaultRegistry
+	next, active uint32
+}
+
+func init() { sdk.OnTestReset(func() { vaultStateMemo = nil }) }
+
+func memoVaultState(vaults VaultRegistry, next, active uint32) {
+	vaultStateMemo = &vaultStateSnap{append(VaultRegistry(nil), vaults...), next, active}
+}
+
+// LoadVaultState reads the registry and its two counters. The caller gets its
+// own copy and may change it.
 func LoadVaultState() (VaultRegistry, uint32, uint32, error) {
+	if m := vaultStateMemo; m != nil {
+		return append(VaultRegistry(nil), m.vaults...), m.next, m.active, nil
+	}
 	var vaults VaultRegistry
 	if raw := stateBytes(constants.VaultRegistryKey); len(raw) > 0 {
 		v, err := UnmarshalVaultRegistry(raw)
@@ -132,11 +154,13 @@ func LoadVaultState() (VaultRegistry, uint32, uint32, error) {
 	if s := stateBytes(constants.VaultActiveGenKey); len(s) == 4 {
 		activeGen = binary.BigEndian.Uint32(s)
 	}
+	memoVaultState(vaults, nextGen, activeGen)
 	return vaults, nextGen, activeGen, nil
 }
 
 // SaveVaultState writes the registry and its counters.
 func SaveVaultState(vaults VaultRegistry, nextGen, activeGen uint32) {
+	memoVaultState(vaults, nextGen, activeGen)
 	sdk.StateSetObject(constants.VaultRegistryKey, string(MarshalVaultRegistry(vaults)))
 	var nb, ab [4]byte
 	binary.BigEndian.PutUint32(nb[:], nextGen)
@@ -182,6 +206,9 @@ func tssKeyPub(name string, statuses ...string) (CompressedPubKey, bool) {
 // registry, so a contract upgraded in place can never mint a divergent
 // generation 0.
 func FoldLegacyKeyIfNeeded(allowPending bool) bool {
+	if m := vaultStateMemo; m != nil && len(m.vaults) > 0 {
+		return false
+	}
 	if len(stateBytes(constants.VaultRegistryKey)) > 0 {
 		return false
 	}

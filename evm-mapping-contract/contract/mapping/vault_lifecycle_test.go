@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"evm-mapping-contract/contract/crypto"
 	"math/big"
 	"strconv"
 	"strings"
@@ -171,6 +172,9 @@ func TestA01_RotationGates(t *testing.T) {
 	if ActiveKeyName() != "primaryv1" {
 		t.Fatalf("active key %s", ActiveKeyName())
 	}
+	if c := sdk.StateGetObject(constants.VaultAddrCachePrefix + "1"); c == nil || !strings.HasSuffix(*c, "|"+crypto.AddressToHex(mustAddr(t, testAdr2))) {
+		t.Fatal("the new generation's address was not cached at activation")
+	}
 	if addr, ok := TssVaultAddress(); !ok || addr != mustAddr(t, testAdr2) {
 		t.Fatal("vault address did not move to the new generation")
 	}
@@ -277,7 +281,8 @@ func TestA01_DiscardAndRenew(t *testing.T) {
 		t.Fatalf("re-mint got gen %d %s, want 2", g, name)
 	}
 
-	// Renew: fund-holding generations only; an unrenewable one is reported.
+	// Renew: fund-holding and pending generations; an unrenewable fund-holding
+	// one is reported, a pending one still in keygen (no key) is not.
 	vaults, next, active, _ := LoadVaultState()
 	vaults = append(vaults, Vault{Generation: 3, Status: VaultStatusPurged, Predecessor: 2},
 		Vault{Generation: 4, Status: VaultStatusDraining, Predecessor: 3})
@@ -286,6 +291,10 @@ func TestA01_DiscardAndRenew(t *testing.T) {
 	ren, skip, err := RenewableVaultKeyNames()
 	if err != nil || len(ren) != 1 || ren[0] != "primary" || len(skip) != 1 || skip[0] != "primaryv4" {
 		t.Fatalf("renewable %v skipped %v %v", ren, skip, err)
+	}
+	sdk.StubSetTssKeyFor("primaryv2", "active,"+testPub2+",ecdsa,1,0") // keygen done, waiting to activate
+	if ren, _, _ = RenewableVaultKeyNames(); len(ren) != 2 || ren[1] != "primaryv2" {
+		t.Fatalf("renewable %v: want the pending generation's key renewed too", ren)
 	}
 }
 
