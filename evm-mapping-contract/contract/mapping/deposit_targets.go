@@ -15,6 +15,7 @@ import (
 type depositTargetSet struct {
 	gens    []fundHoldingGen
 	matched [20]byte
+	l1      uint64 // the deposit's L1 block
 }
 
 // newDepositTargets is the fund-holding generations, or, for a contract with no
@@ -65,4 +66,5 @@ func (t *depositTargetSet) book(asset string, amount *big.Int) {
 		return
 	}
 	addVaultBook(g.Generation, asset, amount)
+	noteBookedHeight(g.Generation, t.l1)
 }

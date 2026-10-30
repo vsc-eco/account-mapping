@@ -301,6 +301,9 @@ func retireActiveGeneration(vaults VaultRegistry, gen uint32) error {
 		setVaultBook(gen, asset, held) // aborts on a negative: the books disagree with the custody
 	}
 	setSweepNonce(gen, GetPendingNonce())
+	// Every deposit in the snapshot mined at or before the newest stored
+	// header: an ETH sweep's balance proof must not be older.
+	noteBookedHeight(gen, blocklist.GetLastHeight())
 	sdk.StateDeleteObject(constants.NonceConfirmedKey)
 	sdk.StateDeleteObject(constants.NoncePendingKey)
 	return nil

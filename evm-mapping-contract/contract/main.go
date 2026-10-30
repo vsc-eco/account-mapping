@@ -292,6 +292,97 @@ func vaultInfo(_ *string) *string {
 	return &out
 }
 
+// A01 operational ops: the owner or the vault operator (the bot) drives them.
+// They are pause-gated, as the BTC contract's: each authorizes a new signature
+// or retires state. Settlement (confirmSweep) is not.
+
+type migrateVaultParams struct {
+	EthProof *mapping.AccountProof `json:"eth_proof"`
+}
+
+//go:wasmexport migrateVault
+func migrateVault(input *string) *string {
+	checkOperator()
+	assertNotPaused()
+	var p migrateVaultParams
+	if input != nil && *input != "" {
+		unmarshalParams(input, &p)
+	}
+	out, err := mapping.HandleMigrateVault(chainId(), p.EthProof)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport confirmSweep
+func confirmSweep(input *string) *string {
+	var req mapping.ConfirmSweepRequest
+	unmarshalParams(input, &req)
+	if err := mapping.HandleConfirmSweep(&req, chainId()); err != nil {
+		ce.CustomAbort(ce.WrapContractError(ce.ErrInput, err))
+	}
+	return nil
+}
+
+type sweepIdParams struct {
+	Gen   uint32 `json:"gen"`
+	Nonce uint64 `json:"nonce"`
+}
+
+//go:wasmexport redriveSweep
+func redriveSweep(input *string) *string {
+	checkOperator()
+	assertNotPaused()
+	var p sweepIdParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleRedriveSweep(p.Gen, p.Nonce, chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport retireVault
+func retireVault(_ *string) *string {
+	checkOperator()
+	assertNotPaused()
+	out, err := mapping.ReconcileRetiringVaults(chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport writeOffDust
+func writeOffDust(_ *string) *string {
+	checkOperator()
+	assertNotPaused()
+	out, err := mapping.HandleWriteOffDust()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+type writeOffTokenParams struct {
+	Gen    uint32 `json:"gen"`
+	Symbol string `json:"symbol"`
+}
+
+//go:wasmexport writeOffToken
+func writeOffToken(input *string) *string {
+	checkOwner()
+	assertNotPaused()
+	var p writeOffTokenParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleWriteOffToken(p.Gen, p.Symbol)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 // -----------------------------------------------------------------------------
 // User-facing wasmexports (NOT admin — no propose/execute wrapping)
 // -----------------------------------------------------------------------------

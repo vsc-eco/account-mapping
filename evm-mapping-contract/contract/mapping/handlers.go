@@ -65,6 +65,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 	}
 
 	req := &params.TxData
+	targets.l1 = req.BlockHeight
 
 	switch req.DepositType {
 	case "eth":
