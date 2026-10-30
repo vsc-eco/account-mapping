@@ -115,3 +115,20 @@ func TestA01_ImmediateIssueCountsItsOwnDebit(t *testing.T) {
 		t.Fatalf("%q %v, want issued at once from the new generation's 2 ETH", status, err)
 	}
 }
+
+// The replace cooldown of the new generation's nonce 0 is its own, not the
+// retired generation's nonce 0.
+func TestA01_ReplaceCooldownIsPerGeneration(t *testing.T) {
+	sdk.ResetTestState()
+	sdk.StubClearTssKeys()
+	if k := replaceCooldownKey(0); k != constants.ReplaceWithdrawalLastKey+"0" {
+		t.Fatalf("pre-rotation key %q", k)
+	}
+	SaveVaultState(VaultRegistry{
+		{Generation: 0, Primary: pubOf(t, testPub1), Status: VaultStatusRetiring, Predecessor: 0},
+		{Generation: 1, Primary: pubOf(t, testPub2), Status: VaultStatusActive, Predecessor: 0},
+	}, 2, 1)
+	if k := replaceCooldownKey(0); k != constants.ReplaceWithdrawalLastKey+"1-0" {
+		t.Fatalf("generation 1 key %q", k)
+	}
+}

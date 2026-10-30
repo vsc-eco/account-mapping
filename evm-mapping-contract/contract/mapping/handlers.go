@@ -1452,7 +1452,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	// lifecycles. Each new withdrawal (a higher confirmedNonce) reads a fresh
 	// empty key, so its FIRST fee-bump is never blocked by an unrelated prior
 	// withdrawal's replace clock. No reset bookkeeping is needed.
-	cooldownKey := constants.ReplaceWithdrawalLastKey + strconv.FormatUint(confirmedNonce, 10)
+	cooldownKey := replaceCooldownKey(confirmedNonce)
 	if last := sdk.StateGetObject(cooldownKey); last != nil {
 		lastH, _ := strconv.ParseUint(*last, 10, 64)
 		if rwEnv.BlockHeight < lastH+constants.ReplaceWithdrawalCooldown {
@@ -1779,7 +1779,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 			"; it can be rolled from L1 block " + strconv.FormatUint(ps.BlockHeight+constants.WithdrawalRollWindow, 10))
 	}
 	env := sdk.GetEnv()
-	cooldownKey := constants.ReplaceWithdrawalLastKey + strconv.FormatUint(confirmedNonce, 10)
+	cooldownKey := replaceCooldownKey(confirmedNonce)
 	if last := sdk.StateGetObject(cooldownKey); last != nil {
 		lastH, _ := strconv.ParseUint(*last, 10, 64)
 		if env.BlockHeight < lastH+constants.ReplaceWithdrawalCooldown {
@@ -2047,3 +2047,15 @@ const ConfirmSpendSchemaJSON = `{"version":2,"type":"ConfirmSpendRequest","field
 	`{"name":"intent_amount","type":"string"},` +
 	`{"name":"intent_asset","type":"string"}` +
 	`]}`
+
+// replaceCooldownKey is the replace/roll cooldown record of the active
+// generation's withdrawal at nonce. A01: each generation's address counts its
+// nonces from 0, so generation N > 0 keys it by generation too; generation 0
+// keeps the original key.
+func replaceCooldownKey(nonce uint64) string {
+	if v, ok := ActiveVault(); ok && v.Generation > 0 {
+		return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(uint64(v.Generation), 10) +
+			constants.DirPathDelimiter + strconv.FormatUint(nonce, 10)
+	}
+	return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(nonce, 10)
+}
