@@ -55,11 +55,31 @@ func TestD6_InitWiresTheVerifierAndKeyOnce(t *testing.T) {
 
 	// Without the fields, init wires nothing (the existing deploy flow).
 	fresh()
-	if msg := run(`{"chain_id":1}`); msg != "" {
+	if msg := run(`{"chain_id":11155111}`); msg != "" {
 		t.Fatal(msg)
 	}
 	if _, ok := sdk.TestStateGet(constants.VerifierContractIdKey); ok || len(sdk.TestCreatedKeys()) != 0 {
 		t.Fatalf("plain init wired the verifier or requested a key")
+	}
+
+	// A07: is_testnet unlocks clearTestnetState, so it is refused on Ethereum
+	// mainnet (chain 1) and nothing is written.
+	if !admin.FastTimelockBuild {
+		fresh()
+		if msg := run(`{"chain_id":1,"is_testnet":true}`); !strings.Contains(msg, "is_testnet cannot be set on chain_id 1") {
+			t.Fatalf("is_testnet on chain 1 = %q, want refused", msg)
+		}
+		if _, ok := sdk.TestStateGet(constants.InitMarkerKey); ok {
+			t.Fatal("a refused init marked the contract initialized")
+		}
+		fresh()
+		if msg := run(`{"chain_id":1}`); msg != "" {
+			t.Fatalf("mainnet init without is_testnet: %s", msg)
+		}
+		fresh()
+		if msg := run(`{"chain_id":11155111,"is_testnet":true}`); msg != "" {
+			t.Fatalf("Sepolia testnet init: %s", msg)
+		}
 	}
 
 	// The admin path requests the same key.

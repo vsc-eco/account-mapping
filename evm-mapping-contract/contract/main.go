@@ -143,6 +143,11 @@ func initContract(input *string) *string {
 	if admin.FastTimelockBuild && !params.IsTestnet {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "this build has devnet timelocks (devnet_fasttimelock): initContract requires is_testnet"))
 	}
+	// A07: is_testnet unlocks clearTestnetState (wipes nonces, queue and observed
+	// deposits). A bridge on Ethereum mainnet must never carry it.
+	if params.IsTestnet && params.ChainId == 1 {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "is_testnet cannot be set on chain_id 1 (Ethereum mainnet)"))
+	}
 	sdk.StateSetObject(constants.ChainIdKey, strconv.FormatUint(params.ChainId, 10))
 	// review6 H2: OracleAccountKey is no longer written at init — the
 	// oracle-fed addBlocks path was removed; headers come from the ZK
