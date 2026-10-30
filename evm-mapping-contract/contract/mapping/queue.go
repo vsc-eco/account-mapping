@@ -35,7 +35,7 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 	// call would delete (a state write costs RC even when it is undone).
 	if QueueLen() == 0 {
 		if header := issuableNow(vault); header != nil {
-			if out, _ := issueQueued(&q, vault, chainId, header); out == queueIssued {
+			if out, _ := issueQueued(&q, vault, chainId, header, false); out == queueIssued {
 				return "issued:" + strconv.FormatUint(next, 10), nil
 			}
 		}
@@ -126,7 +126,7 @@ func drainWith(chainId uint64, vault [20]byte, max int) int {
 			continue
 		}
 		scanned++
-		switch out, why := issueQueued(q, vault, chainId, header); out {
+		switch out, why := issueQueued(q, vault, chainId, header, true); out {
 		case queueIssued:
 			RemoveQueued(seq, q)
 			issued++
@@ -159,7 +159,10 @@ func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
 // terms cannot pay it (the ETH fee is above the caller's cap or does not fit
 // in a netted amount; an ERC-20 transfer's gas is above the caller's
 // max_fee), queueWait when the gas reserve does not cover an ERC-20 transfer.
-func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *blocklist.EthBlockHeader) (int, string) {
+//
+// queued says q is a queue entry (its debit is in QueuedDebit); false for the
+// request issuing at once without one.
+func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *blocklist.EthBlockHeader, queued bool) (int, string) {
 	toAddr, err := crypto.HexToAddress(q.To)
 	if err != nil || toAddr == ([20]byte{}) {
 		return queueRefund, "bad recipient" // validated at request time; unreachable
@@ -202,6 +205,9 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 			}
 			userCost.Add(q.Amount, feeWei)
 		}
+		if !activeGenCovers(q, queued, constants.NativeAsset, new(big.Int).Add(l1Value, feeWei), nil) {
+			return queueWait, ""
+		}
 		unsigned = BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value, gas)
 		ps.Amount = l1Value // the L1 tx value: returns to the vault on revert
 		ps.GasCost = feeWei // prepaid by the caller
@@ -224,6 +230,9 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		// require it to cover this transfer (RV-6), else wait for a top-up.
 		reserve := getGasReserve()
 		if reserve.Cmp(big.NewInt(constants.MinGasReserve)) < 0 || reserve.Cmp(gasCost) < 0 {
+			return queueWait, ""
+		}
+		if !activeGenCovers(q, queued, q.Asset, q.Amount, gasCost) {
 			return queueWait, ""
 		}
 		deductGasReserve(gasCost)
@@ -301,4 +310,42 @@ func defaultETHFeeCap(gas uint64) *big.Int {
 		return floor
 	}
 	return fee
+}
+
+// activeGenCovers reports whether the active vault generation's own funds cover
+// a withdrawal: amount of asset plus, for an ERC-20, ethGas of ETH (A01).
+//
+// While a superseded generation still holds funds, part of the custody sits at
+// its address until the sweep lands; the new generation can only send what
+// reached it. What is there and not yet committed to an issued withdrawal is
+// the custody plus the queued debits (requested, not yet sent) plus this
+// request's own debit when it is not queued, less the superseded generations'
+// books. Short means wait: the entry stays queued until the sweep confirms. With
+// no superseded book in these assets, nothing is checked (the pre-rotation
+// behaviour).
+func activeGenCovers(q *QueuedWithdrawal, queued bool, asset string, amount, ethGas *big.Int) bool {
+	need := map[string]*big.Int{asset: new(big.Int).Set(amount)}
+	if ethGas != nil {
+		if e, ok := need[constants.NativeAsset]; ok {
+			e.Add(e, ethGas)
+		} else {
+			need[constants.NativeAsset] = new(big.Int).Set(ethGas)
+		}
+	}
+	for a, n := range need {
+		books := SupersededBookTotal(a)
+		if books.Sign() == 0 {
+			continue
+		}
+		avail := new(big.Int).Set(GetSupply(a).Active)
+		avail.Add(avail, QueuedDebit(a))
+		if !queued && q.Asset == a && q.Debit != nil {
+			avail.Add(avail, q.Debit)
+		}
+		avail.Sub(avail, books)
+		if avail.Cmp(n) < 0 {
+			return false
+		}
+	}
+	return true
 }
