@@ -916,6 +916,26 @@ func dispatchAdmin(action string, payload []byte) {
 		}
 		mapping.SetProofFee(p.Asset, fee)
 
+	case "setTokenGasRate":
+		// A11: the price of 1 ETH in a registered token's smallest units, so
+		// an ERC-20 withdrawal pays its L1 gas in the token; 0 removes it. The
+		// fee it sets is at most half the token's minimum withdrawal.
+		var p struct {
+			Symbol string `json:"symbol"`
+			Rate   string `json:"rate"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: bad payload"))
+		}
+		rate, ok := new(big.Int).SetString(p.Rate, 10)
+		if !ok || rate.Sign() < 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: rate must be a non-negative integer"))
+		}
+		if p.Symbol == "" || p.Symbol == "eth" || mapping.ProofFeeFloor(p.Symbol) == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: not a registered token: "+p.Symbol))
+		}
+		mapping.SetTokenGasRate(p.Symbol, rate)
+
 	case "registerRouter":
 		assertNotPaused()
 		// MED-23 (M18-D22): reject an empty router id. routeDeposit treats an

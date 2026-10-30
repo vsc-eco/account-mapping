@@ -7,6 +7,7 @@ import (
 
 	"evm-mapping-contract/contract/constants"
 	"evm-mapping-contract/contract/crypto"
+	"evm-mapping-contract/sdk"
 )
 
 // The proving fee: a deposit pays it out of its credit and a withdrawal on top
@@ -173,5 +174,85 @@ func TestPROOFFEE_IsNotRefundedWithACancelledWithdrawal(t *testing.T) {
 	}
 	if got := GetBalance("hive:u", "eth"); new(big.Int).Sub(before, got).Cmp(big.NewInt(1e14)) != 0 || feeBalance("eth").Cmp(big.NewInt(1e14)) != 0 {
 		t.Fatalf("after the cancel hive:u is down %s, fee account %s; want both 1e14", new(big.Int).Sub(before, got), feeBalance("eth"))
+	}
+}
+
+// A11: an ERC-20 withdrawal pays the L1 gas the ETH reserve fronts for it in
+// the token, at the owner's rate, out of what it sends, to the operator; at
+// most half the token's minimum withdrawal. Unset, nothing is charged.
+func TestA11_TokenWithdrawalPaysItsGasInTheToken(t *testing.T) {
+	issue := func(rate string) (*PendingSpend, *big.Int) {
+		t.Helper()
+		rpBridge(t, new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18)), "hive:alice")
+		sdk.StateSetObject(constants.TokenRegistryPrefix+"1-00000000000000000000000000000000000000c0", "USDC|6|2000000") // min 2 USDC
+		if rate != "" {
+			r, _ := new(big.Int).SetString(rate, 10)
+			SetTokenGasRate("USDC", r)
+		}
+		IncBalance("hive:alice", "USDC", big.NewInt(3_000_000))
+		TrackDeposit("USDC", big.NewInt(3_000_000), new(big.Int))
+		before := new(big.Int).Set(GetSupply("USDC").Active)
+		sdk.SetTestCaller("hive:alice")
+		status, err := HandleUnmapERC20(&TransferParams{Amount: "3000000", To: "0x00000000000000000000000000000000000000e2", Asset: "USDC", TokenAddress: "0x00000000000000000000000000000000000000c0"}, [20]byte{1}, 1)
+		if err != nil || !strings.HasPrefix(status, "issued:") {
+			t.Fatalf("unmapERC20: %q %v", status, err)
+		}
+		return GetPendingSpend(0), new(big.Int).Sub(before, GetSupply("USDC").Active)
+	}
+	// 65,000 gas at 2x the 1 gwei base fee + 2 gwei tip = 2.6e14 wei; at 3,000
+	// USDC per ETH that is 0.78 USDC.
+	ps, out := issue("3000000000")
+	_, _, data, _ := decodeUnsignedEIP1559(hexBytes(ps.UnsignedTxHex))
+	sent := new(big.Int).SetBytes(data[36:68])
+	if sent.Cmp(big.NewInt(2_220_000)) != 0 || ps.Amount.Cmp(sent) != 0 {
+		t.Fatalf("sends %s (record %s), want 3 USDC less the 0.78 USDC gas fee", sent, ps.Amount)
+	}
+	if got := GetBalance(constants.TokenGasFeeRecipient, "USDC"); got.Cmp(big.NewInt(780_000)) != 0 {
+		t.Fatalf("operator got %s, want 780000", got)
+	}
+	if out.Cmp(sent) != 0 {
+		t.Fatalf("custody fell by %s, want only what left (%s): the fee stays in custody", out, sent)
+	}
+	// Rounded up: 2.6e14 wei at 3,000.000001 USDC per ETH is 780,000.00026.
+	issue("3000000001")
+	if got := GetBalance(constants.TokenGasFeeRecipient, "USDC"); got.Cmp(big.NewInt(780_001)) != 0 {
+		t.Fatalf("operator got %s, want 780001 (rounded up)", got)
+	}
+	// A rate far off is capped at half the minimum withdrawal.
+	ps, _ = issue("3000000000000")
+	if got := GetBalance(constants.TokenGasFeeRecipient, "USDC"); got.Cmp(big.NewInt(1_000_000)) != 0 {
+		t.Fatalf("capped fee %s, want 1000000 (half the 2 USDC minimum)", got)
+	}
+	_ = ps
+	// No rate: no fee.
+	ps, _ = issue("")
+	if ps.Amount.Cmp(big.NewInt(3_000_000)) != 0 || GetBalance(constants.TokenGasFeeRecipient, "USDC").Sign() != 0 {
+		t.Fatalf("no rate: sends %s, operator %s", ps.Amount, GetBalance(constants.TokenGasFeeRecipient, "USDC"))
+	}
+}
+
+// A11: a queued ERC-20 withdrawal whose gas fee came to its whole amount (its
+// token's minimum withdrawal raised since it was queued, so the cap with it) is
+// refunded in full, not sent for nothing.
+func TestA11_GasFeeNotBelowTheAmountIsRefunded(t *testing.T) {
+	rpBridge(t, new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18)), "hive:alice")
+	reg := constants.TokenRegistryPrefix + "1-00000000000000000000000000000000000000c0"
+	sdk.StateSetObject(reg, "USDC|6|2000000")
+	IncBalance("hive:alice", "USDC", big.NewInt(3_000_000))
+	TrackDeposit("USDC", big.NewInt(3_000_000), new(big.Int))
+	SetPendingNonce(constants.MaxInFlightWithdrawals) // it queues
+	sdk.SetTestCaller("hive:alice")
+	if status, err := HandleUnmapERC20(&TransferParams{Amount: "3000000", To: "0x00000000000000000000000000000000000000e2", Asset: "USDC", TokenAddress: "0x00000000000000000000000000000000000000c0"}, [20]byte{1}, 1); err != nil || !strings.HasPrefix(status, "queued:") {
+		t.Fatalf("unmapERC20: %q %v", status, err)
+	}
+	before := GetBalance("hive:alice", "USDC")
+	sdk.StateSetObject(reg, "USDC|6|10000000") // min 10 USDC: the cap is now 5
+	SetTokenGasRate("USDC", new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	SetPendingNonce(0)
+	if drainWith(1, [20]byte{1}, 8) != 0 || GetPendingSpend(0) != nil {
+		t.Fatal("issued a withdrawal its gas fee eats whole")
+	}
+	if got := new(big.Int).Sub(GetBalance("hive:alice", "USDC"), before); got.Cmp(big.NewInt(3_000_000)) != 0 || QueueLen() != 0 {
+		t.Fatalf("refunded %s, queue %d: want the 3 USDC back and the entry gone", got, QueueLen())
 	}
 }

@@ -89,7 +89,7 @@ func TimelockFor(action string) (uint64, error) {
 		return TimelockLong, nil
 	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
-	case "registerToken", "registerRouter", "setETHGasLimit", "setProofFee",
+	case "registerToken", "registerRouter", "setETHGasLimit", "setProofFee", "setTokenGasRate",
 		"registerRelayer", "deregisterRelayer", "clearTestnetState":
 		return TimelockOperational, nil
 	// D7: renewKey only extends the vault key's life and moves nothing. The

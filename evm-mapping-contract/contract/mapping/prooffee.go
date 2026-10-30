@@ -97,3 +97,40 @@ func ProofFeeFloor(asset string) *big.Int {
 	}
 	return big.NewInt(info.MinDeposit())
 }
+
+// TokenGasRate is the owner-set price of 1 ETH in symbol's smallest units, 0
+// when unset (A11).
+func TokenGasRate(symbol string) *big.Int {
+	if v := sdk.StateGetObject(constants.TokenGasRatePrefix + symbol); v != nil {
+		if n, ok := new(big.Int).SetString(*v, 10); ok && n.Sign() > 0 {
+			return n
+		}
+	}
+	return new(big.Int)
+}
+
+// SetTokenGasRate sets symbol's rate; 0 removes it.
+func SetTokenGasRate(symbol string, rate *big.Int) {
+	if rate.Sign() <= 0 {
+		sdk.StateDeleteObject(constants.TokenGasRatePrefix + symbol)
+		return
+	}
+	sdk.StateSetObject(constants.TokenGasRatePrefix+symbol, rate.String())
+}
+
+// tokenGasFee is what an ERC-20 withdrawal of symbol pays in the token for
+// gasWei of L1 gas the ETH reserve fronts (A11): gasWei at the owner's rate,
+// rounded up, and at most half the token's minimum withdrawal (as the proving
+// fee is bounded), so a stale or wrong rate cannot take more; above that the
+// reserve carries the rest, as it carried all of it before.
+func tokenGasFee(symbol string, gasWei *big.Int, minWithdrawal int64) *big.Int {
+	rate := TokenGasRate(symbol)
+	if rate.Sign() == 0 || gasWei.Sign() <= 0 {
+		return new(big.Int)
+	}
+	oneEth := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	fee := new(big.Int).Mul(gasWei, rate)
+	fee.Add(fee, new(big.Int).Sub(oneEth, big.NewInt(1)))
+	fee.Div(fee, oneEth)
+	return minBig(fee, big.NewInt(minWithdrawal/2))
+}

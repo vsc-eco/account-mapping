@@ -247,10 +247,27 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		if !activeGenCovers(q, queued, q.Asset, q.Amount, gasCost) {
 			return queueWait, ""
 		}
+		// A11: the reserve fronts the gas; the withdrawal pays it back in the
+		// token, out of what it sends (THORChain takes its outbound fee from the
+		// outbound amount), to the operator who tops the reserve up.
+		send := new(big.Int).Set(q.Amount)
+		var gasFee *big.Int
+		if info := getTokenInfo(chainId, tokenAddr); info != nil {
+			gasFee = tokenGasFee(q.Asset, gasCost, info.MinWithdrawal)
+			if gasFee.Cmp(send) >= 0 {
+				return queueRefund, "gas fee " + gasFee.String() + " " + q.Asset + " not below the amount"
+			}
+			send.Sub(send, gasFee)
+		}
 		deductGasReserve(gasCost)
 		TrackReserveSpend(gasCost)
-		unsigned = BuildERC20WithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, q.Amount, q.GasLimit)
-		ps.Amount = q.Amount
+		if gasFee != nil && gasFee.Sign() > 0 {
+			IncBalance(constants.TokenGasFeeRecipient, q.Asset, gasFee)
+			TrackDeposit(q.Asset, gasFee, new(big.Int)) // it stays in custody, now the recipient's
+			sdk.Log("tokengasfee|a=" + q.Asset + "|v=" + gasFee.String() + "|gas=" + gasCost.String())
+		}
+		unsigned = BuildERC20WithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, send, q.GasLimit)
+		ps.Amount = send
 		ps.GasCost = gasCost
 		ps.RevertFee = q.RevertFee
 		ps.GasLimit = q.GasLimit

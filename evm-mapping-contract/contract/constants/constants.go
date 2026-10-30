@@ -161,10 +161,19 @@ const ETHGasLimitKey = "egl"
 const ProofFeePrefix = "pf-"
 const ProofFeeRecipient = "hive:altera.app"
 
+// TokenGasRatePrefix (tgr-{symbol}) is the owner-set price of 1 ETH in a
+// token's smallest units (A11): an ERC-20 withdrawal pays the L1 gas the ETH
+// reserve fronts for it, in the token, to RevertFeeRecipient. Unset: no charge.
+const TokenGasRatePrefix = "tgr" + DirPathDelimiter
+
 // RevertFeeRecipient receives an ERC-20 withdrawal's revert fee (USDC-1): the
 // operator, who pays for the proofs and tops up the ETH gas reserve that paid
 // the reverted transfer's gas (A35: it went to the contract owner).
 const RevertFeeRecipient = ProofFeeRecipient
+
+// TokenGasFeeRecipient receives an ERC-20 withdrawal's gas fee in the token
+// (A11): the operator, who tops up the ETH reserve that paid the gas.
+const TokenGasFeeRecipient = ProofFeeRecipient
 
 // Minimum withdrawal amounts (in token-native units).
 // big.Int/wei migration: native ETH accounting is now full wei (18 decimals),
