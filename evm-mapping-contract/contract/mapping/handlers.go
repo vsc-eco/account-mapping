@@ -59,7 +59,8 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
-	if vaultAddress == ([20]byte{}) {
+	targets := newDepositTargets(vaultAddress)
+	if len(targets.gens) == 0 {
 		return ce.NewContractError(ce.ErrInitialization, "vault address not configured")
 	}
 
@@ -79,7 +80,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// W4 Cluster B CRIT #6 Site 1: chainId passed in so VerifyETHDeposit
 		// can reject wrong-chain txs before any state mutation. calldata is the
 		// PROVEN L1 tx data field — the depositor-signed routing-intent channel.
-		sender, amountBytes, calldata, txHash, err := VerifyETHDeposit(req, vaultAddress, chainId)
+		sender, amountBytes, calldata, txHash, err := VerifyETHDeposit(req, targets.isVault, chainId)
 		if err != nil {
 			return err
 		}
@@ -105,6 +106,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		if hasToReserveInstruction(instructions) {
 			addGasReserve(amount)
 			TrackDeposit("eth", new(big.Int), amount)
+			targets.book("eth", amount)
 			MarkObserved(req.BlockHeight, txHash, uint16(req.TxIndex))
 			return nil
 		}
@@ -141,6 +143,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 			IncBalance(dest, "eth", credit)
 		}
 		TrackDeposit("eth", netAmount, gasTax)
+		targets.book("eth", amount)
 		return nil
 
 	case "erc20":
@@ -157,7 +160,7 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 
 		// W4 Cluster B CRIT #6 Site 2: chainId threaded so VerifyERC20Deposit
 		// can read the stored header's chainId and cross-check.
-		sender, amountBytes, txHash, err := VerifyERC20Deposit(req, vaultAddress, tokenAddr, chainId)
+		sender, amountBytes, txHash, err := VerifyERC20Deposit(req, targets.isVault, tokenAddr, chainId)
 		if err != nil {
 			return err
 		}
@@ -180,13 +183,14 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		dest := crypto.AddressToDID(sender)
 		IncBalance(dest, tokenInfo.Symbol, takeDepositProofFee(tokenInfo.Symbol, amount))
 		TrackDeposit(tokenInfo.Symbol, amount, new(big.Int))
+		targets.book(tokenInfo.Symbol, amount)
 		// CRIT #8 / W4 Cluster A + CRIT #14 logIndex: lock observed slot
 		// only after routing + credit succeed.
 		MarkObserved(req.BlockHeight, txHash, uint16(req.LogIndex))
 		return nil
 
 	case "contract":
-		return handleContractDeposit(req, vaultAddress, chainId)
+		return handleContractDeposit(req, targets, chainId)
 
 	default:
 		return ce.NewContractError(ce.ErrInput, "deposit_type must be 'eth', 'erc20' or 'contract'")

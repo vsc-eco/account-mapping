@@ -35,9 +35,12 @@ var TransferEventSig = func() [32]byte { var h [32]byte; copy(h[:], transferEven
 // W4 Cluster B CRIT #6 Site 1: chainId threaded in so the parsed tx's
 // ChainId field is cross-checked BEFORE ecrecover spends cycles. Pre-fix
 // a chain-X tx could be replayed against the chain-Y bridge state.
+//
+// A01: isVault reports whether an address is one of the vault's fund-holding
+// generations (the caller records which one matched).
 func VerifyETHDeposit(
 	req *VerificationRequest,
-	vaultAddress [20]byte,
+	isVault func([20]byte) bool,
 	chainId uint64,
 ) ([20]byte, []byte, []byte, [32]byte, error) {
 	var sender [20]byte
@@ -94,7 +97,7 @@ func VerifyETHDeposit(
 	}
 
 	// Verify destination is vault
-	if parsedTx.To != vaultAddress {
+	if !isVault(parsedTx.To) {
 		return sender, nil, nil, txHash, ErrNotVaultDeposit
 	}
 
@@ -152,9 +155,12 @@ func VerifyETHDeposit(
 // W4 Cluster B CRIT #6 Site 2: chainId threaded so the stored header's
 // ChainId field is cross-checked. Pre-fix the receipt-trie proof could be
 // valid but the underlying block could have come from a different chain.
+//
+// A01: isVault reports whether an address is one of the vault's fund-holding
+// generations (the caller records which one matched).
 func VerifyERC20Deposit(
 	req *VerificationRequest,
-	vaultAddress [20]byte,
+	isVault func([20]byte) bool,
 	tokenAddr [20]byte,
 	chainId uint64,
 ) ([20]byte, []byte, [32]byte, error) {
@@ -258,9 +264,8 @@ func VerifyERC20Deposit(
 	// check on the vault topic too. We construct the canonical padded
 	// vault here, so the equality check below already catches non-canon
 	// high bytes; documented for clarity.
-	var vaultPadded [32]byte
-	copy(vaultPadded[12:], vaultAddress[:])
-	if log.Topics[2] != vaultPadded {
+	vaultAddress, canonical := topicAddress(log.Topics[2])
+	if !canonical || !isVault(vaultAddress) {
 		return sender, nil, txHash, ErrNotVaultDeposit
 	}
 

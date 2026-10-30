@@ -134,7 +134,10 @@ func transferPaysAContractDeposit(logs []ParsedLog, j int, vault [20]byte) bool 
 // same reserve share as a plain ETH deposit; a token must be registered and its
 // paying Transfer is marked observed too. An invalid recipient is credited to
 // the sender's account (as deposit_to, A5).
-func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uint64) error {
+//
+// A01: each fund-holding generation has its own MagiDeposit; the deposit is
+// credited at the generation whose MagiDeposit emitted the log and booked to it.
+func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, chainId uint64) error {
 	header := blocklist.GetHeader(req.BlockHeight)
 	if header == nil {
 		return ErrBlockNotFound
@@ -167,6 +170,10 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 	if int(req.LogIndex) >= len(logs) {
 		return ce.NewContractError(ce.ErrInput, "log_index out of range")
 	}
+	vault, known := targets.vaultOfDepositContract(logs[req.LogIndex].Address)
+	if !known {
+		return ce.NewContractError(ce.ErrInput, "not a Deposit log of this vault's MagiDeposit")
+	}
 	d, ok := parseDepositLog(logs[req.LogIndex], DepositContractAddress(vault))
 	if !ok {
 		return ce.NewContractError(ce.ErrInput, "not a Deposit log of this vault's MagiDeposit")
@@ -189,6 +196,7 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		}
 		IncBalance(dest, constants.NativeAsset, takeDepositProofFee(constants.NativeAsset, net))
 		TrackDeposit(constants.NativeAsset, net, gasTax)
+		targets.book(constants.NativeAsset, d.amount)
 	} else {
 		info := getTokenInfo(chainId, d.token)
 		if info == nil {
@@ -206,6 +214,7 @@ func handleContractDeposit(req *VerificationRequest, vault [20]byte, chainId uin
 		}
 		IncBalance(dest, info.Symbol, takeDepositProofFee(info.Symbol, d.amount))
 		TrackDeposit(info.Symbol, d.amount, new(big.Int))
+		targets.book(info.Symbol, d.amount)
 		MarkObserved(req.BlockHeight, txHash, uint16(j))
 	}
 	MarkObserved(req.BlockHeight, txHash, uint16(req.LogIndex))
