@@ -479,6 +479,12 @@ func logUnmap(ps PendingSpend, debited *big.Int, gasFromUser bool) {
 // paused) and authorizes no new spend. Gated, a pause outlasting the verifier's
 // header retention pruned the mined withdrawal's header, after which nothing
 // could confirm it or prove it dropped: every withdrawal stayed frozen.
+// errRefundWhilePaused: A04, as THORChain's chain halt stops the value path. A
+// refund credits balances on the strength of an L1 proof; while the bridge is
+// paused (an incident, such as a suspect verifier) refunds wait for the
+// unpause. Settling a paid withdrawal credits nothing and stays open.
+var errRefundWhilePaused = ce.NewContractError(ce.ErrIntent, "contract is paused: a withdrawal refund waits for the unpause (A04)")
+
 func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	confirmedNonce := GetConfirmedNonce()
 	ps := GetPendingSpend(confirmedNonce)
@@ -567,6 +573,9 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	// withdrawal itself is never a 0-value transfer to the vault (an ETH one
 	// carries its amount, an ERC-20 one goes to the token).
 	if ps.Rolled && parsedTx.To == snapshottedVault && new(big.Int).SetBytes(parsedTx.Value).Sign() == 0 {
+		if isPaused() {
+			return errRefundWhilePaused
+		}
 		refundDroppedWithdrawal(ps)
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
@@ -643,12 +652,23 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 	if err != nil || len(items) < 1 {
 		return ce.NewContractError(ce.ErrInput, "invalid receipt RLP")
 	}
-	status := items[0].AsUint64()
+	paid := items[0].AsUint64() == 1
+	if paid && ps.Asset != constants.NativeAsset {
+		// A36: a token that returns false instead of reverting leaves status 1
+		// with nothing moved. Paid only with its Transfer of the amount from the
+		// vault to the recipient.
+		tokenAddr, _ := crypto.HexToAddress(ps.TokenAddress)
+		logs, _ := parseReceiptLogs(receiptBytes) // unparsable: no logs, not paid
+		paid = receiptHasTransfer(logs, tokenAddr, snapshottedVault, psTo, ps.Amount)
+	}
 
-	if status == 1 {
+	if paid {
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
 	} else {
+		if isPaused() {
+			return errRefundWhilePaused
+		}
 		// Reverted receipt (status=0): the tx MINED, so the L1 gas was
 		// genuinely paid to the miner — that custody is gone. Only the tx
 		// VALUE (ps.Amount) returned to the vault; refund exactly that.

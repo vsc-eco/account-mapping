@@ -79,7 +79,7 @@ func (w *rollWorld) roll() error { return HandleRollWithdrawal(0, w.vault, 1) }
 // mine signs unsigned (hex) with the vault key and plants it at TxIndex 1 of
 // L1 block n with a receipt of the given status; returns the confirmSpend
 // request for it.
-func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64) *ConfirmSpendRequest {
+func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64, logs ...[]byte) *ConfirmSpendRequest {
 	w.t.Helper()
 	unsigned, _ := hex.DecodeString(unsignedHex)
 	priv := secp256k1.PrivKeyFromBytes(mustHex(w.t, rollVaultPriv))
@@ -89,7 +89,7 @@ func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64) *ConfirmSp
 		w.t.Fatal(err)
 	}
 	txRoot, txNodes := buildSingleLeafMPT(signed)
-	receipt := rlp.EncodeList(rlp.EncodeUint64(status), rlp.EncodeUint64(21000), rlp.EncodeBytes(make([]byte, 256)), rlp.EncodeList())
+	receipt := rlp.EncodeList(rlp.EncodeUint64(status), rlp.EncodeUint64(21000), rlp.EncodeBytes(make([]byte, 256)), rlp.EncodeList(logs...))
 	rcRoot, rcNodes := buildSingleLeafMPT(append([]byte{0x02}, receipt...))
 	w.header(n, txRoot, rcRoot)
 	w.last = n
@@ -203,7 +203,7 @@ func TestD3_ERC20WithdrawalMinedAfterARollIsNotRefunded(t *testing.T) {
 	if !GetPendingSpend(0).Rolled {
 		t.Fatal("the withdrawal was not marked rolled")
 	}
-	req := w.mine(w.last+1, orig, 1)
+	req := w.mine(w.last+1, orig, 1, rp7Log(token, word32(amount), TransferEventSig[:], addrTopic(w.vault), addrTopic(to)))
 	req.IntentAsset, req.IntentAmount = "usdc", amount.String()
 	if err := HandleConfirmSpend(req, 1); err != nil {
 		t.Fatalf("confirmSpend for the mined ERC-20 withdrawal: %v", err)
