@@ -27,18 +27,21 @@ import (
 // that is asserted here (consensus-executed) and again by the node before it
 // lends a share of the retiring key (output scoping), as for BTC.
 //
-// Order, as THORChain's migrateFunds: tokens first, ETH last, so the retiring
-// address keeps the ETH its token transfers burn as gas (THORChain once left a
-// vault holding tokens and no ETH "until someone donated ETH"). A retiring
+// All of a generation's sweeps are built in one batch at consecutive nonces,
+// ETH first, with the token sweeps' gas kept back at the retiring address (see
+// HandleMigrateVault): THORChain sweeps ETH last so a vault never holds tokens
+// and no ETH (it once did, "until someone donated ETH"); keeping the gas back
+// meets that and lets every asset land in one settle cycle. A retiring
 // generation short of ETH for its token sweeps is topped up with an ordinary
 // to_reserve deposit to its address (credited and booked like any late
 // deposit). Sweep gas comes from the gas reserve, booked as ERC-20 withdrawal
-// gas is. One sweep in flight per generation at a time.
+// gas is. One batch in flight per generation at a time.
 //
-// The ETH sweep moves the PROVEN balance: an account proof against a stored
-// header's state root, at the nonce of the generation's next sweep (so every
-// earlier sweep has mined) and no older than its newest booked deposit (so the
-// proof sees every booked wei). Stray ETH nobody mapped moves with it.
+// The ETH sweep moves the PROVEN balance, less the gas kept back: an account
+// proof against a stored header's state root, at the nonce of the
+// generation's next sweep (so every earlier sweep has mined) and no older than
+// its newest booked deposit (so the proof sees every booked wei). Stray ETH
+// nobody mapped moves with it.
 
 // SweepVersion is one signed version of a sweep. A re-drive signs a new version
 // at the same nonce with a higher fee; only one can mine, and settlement
@@ -240,10 +243,24 @@ func migrationTarget() (target *Vault, successor *Vault, vaults VaultRegistry, e
 	return target, successor, vaults, nil
 }
 
-// HandleMigrateVault builds the next sweep of a superseded generation. It
-// returns a status: the sweep built, or why nothing was (benign states return
-// a status, not an error, so a driver can poll it). ethProof is needed only
-// when the ETH sweep is next.
+// HandleMigrateVault builds the sweeps of a superseded generation, all of them
+// at once (ROT-WINDOW-EVM): the ETH sweep at the generation's next nonce, then
+// one transfer per token at the nonces after it. They sign in the same TSS
+// sign interval and settle in one L1 finality and header cycle. Withdrawals
+// wait for the active generation to hold what they pay (activeGenCovers), so
+// sweeping one asset per cycle kept them waiting one settle cycle per asset
+// (about 30 min each on mainnet), and a token that kept reverting held the
+// ETH, and with it every withdrawal's gas, behind it.
+//
+// The ETH goes first, less SweepGasHeadroom times the token sweeps' gas, which
+// stays at the retiring address to pay them (THORChain's reason for sweeping
+// ETH last, met by keeping the gas back instead). A token sweep can then
+// revert, or be re-driven, without holding up the ETH.
+//
+// It returns a status: the sweeps built, or why nothing was (benign states
+// return a status, not an error, so a driver can poll it). ethProof is needed
+// whenever the generation's booked ETH is more than the gas its token sweeps
+// keep back.
 func HandleMigrateVault(chainId uint64, ethProof *AccountProof) (string, error) {
 	target, successor, _, err := migrationTarget()
 	if err != nil {
@@ -261,8 +278,9 @@ func HandleMigrateVault(chainId uint64, ethProof *AccountProof) (string, error) 
 		return "", ce.NewContractError(ce.ErrTransaction,
 			"the active generation's key has not been reshared since its keygen: migration waits for its first reshare")
 	}
-	if hasOpenSweep(target.Generation) {
-		return "sweep in flight for generation " + strconv.FormatUint(uint64(target.Generation), 10), nil
+	gen := target.Generation
+	if hasOpenSweep(gen) {
+		return "sweep in flight for generation " + strconv.FormatUint(uint64(gen), 10), nil
 	}
 	successorAddr, ok := GenAddress(successor)
 	if !ok {
@@ -276,118 +294,226 @@ func HandleMigrateVault(chainId uint64, ethProof *AccountProof) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	// Tokens first.
+	plans, tokenGas, stuck, err := planTokenSweeps(chainId, gen, header)
+	if err != nil {
+		return "", err
+	}
+	keep := new(big.Int).Mul(tokenGas, big.NewInt(SweepGasHeadroom))
+	ethBook := VaultBook(gen, constants.NativeAsset)
+	genStr := strconv.FormatUint(uint64(gen), 10)
+
+	var eth *ethSweepPlan
+	if ethProof == nil {
+		if ethBook.Cmp(keep) > 0 {
+			return "", ce.NewContractError(ce.ErrInput, "the ETH sweep is next: send eth_proof (an account proof of the retiring address)")
+		}
+		if len(plans) == 0 {
+			if stuck != "" {
+				return stuckTokenStatus(gen, stuck), nil
+			}
+			return "nothing to migrate", nil
+		}
+		// Token sweeps alone: a retry after a revert, or a token that arrived
+		// after the ETH left. Their gas is the ETH kept back for them.
+		if ethBook.Cmp(tokenGas) < 0 {
+			return tooLittleGasStatus(gen, retiringAddr, tokenGas), nil
+		}
+	} else {
+		var balance *big.Int
+		eth, balance, err = planETHSweep(gen, retiringAddr, ethProof, keep, header)
+		if err != nil {
+			return "", err
+		}
+		if eth == nil {
+			if len(plans) == 0 {
+				if stuck != "" {
+					return stuckTokenStatus(gen, stuck), nil
+				}
+				return "generation " + genStr + " holds no more ETH than one sweep's gas: dust, for writeOffDust", nil
+			}
+			// No ETH beyond the token gas: the token sweeps go alone, paid from
+			// what the proof shows is there.
+			if ethBook.Cmp(tokenGas) < 0 || balance.Cmp(tokenGas) < 0 {
+				return tooLittleGasStatus(gen, retiringAddr, tokenGas), nil
+			}
+		}
+	}
+
+	note := ""
+	if eth != nil && len(plans) > 0 && new(big.Int).Sub(ethBook, eth.cost).Cmp(tokenGas) < 0 {
+		// The proof shows ETH the books do not hold (stray), and the books are
+		// short of the token gas: the ETH goes now, keeping the gas back on L1;
+		// the tokens follow once their gas is booked (a to_reserve top-up).
+		plans, tokenGas = nil, new(big.Int)
+		note = "; " + tooLittleGasStatus(gen, retiringAddr, keep)
+	}
+	total := new(big.Int).Set(tokenGas)
+	if eth != nil {
+		total.Add(total, eth.cost)
+	}
+	if getGasReserve().Cmp(total) < 0 {
+		return "gas reserve below the sweeps' gas (" + total.String() + " wei): migration waits for a reserve top-up", nil
+	}
+
+	nonce := SweepNonce(gen)
+	var built []string
+	if eth != nil {
+		built = append(built, buildETHSweep(chainId, gen, nonce, successorAddr, eth))
+		nonce++
+	}
+	for i := range plans {
+		built = append(built, buildTokenSweep(chainId, gen, nonce, successorAddr, &plans[i]))
+		nonce++
+	}
+	setSweepNonce(gen, nonce)
+	markDraining(gen)
+	return strings.Join(built, "; ") + note, nil
+}
+
+// SweepGasHeadroom is how many times its token sweeps' gas a generation keeps
+// back from its ETH sweep. Each re-drive raises a sweep's fee cap by 10%, so
+// twice the gas covers about seven re-drives of every token sweep; the rest is
+// swept with the generation's leftover ETH once they settle.
+const SweepGasHeadroom = 2
+
+type tokenSweepPlan struct {
+	sym    string
+	token  [20]byte
+	amount *big.Int
+	gas    uint64
+	limit  uint64 // the token's registered gas limit (0: default)
+	feeCap uint64
+	cost   *big.Int
+}
+
+// planTokenSweeps prices a transfer of every token the generation holds, in
+// registration order, and sums their gas. A token whose transfers reverted
+// MaxSweepReverts times is left out and named in stuck.
+func planTokenSweeps(chainId uint64, gen uint32, header *blocklist.EthBlockHeader) ([]tokenSweepPlan, *big.Int, string, error) {
+	var plans []tokenSweepPlan
+	gas := new(big.Int)
+	stuck := ""
 	for _, sym := range RegisteredSymbols() {
-		amt := VaultBook(target.Generation, sym)
+		amt := VaultBook(gen, sym)
 		if amt.Sign() <= 0 {
 			continue
 		}
-		if sweepReverts(target.Generation, sym) >= MaxSweepReverts {
+		if sweepReverts(gen, sym) >= MaxSweepReverts {
+			if stuck == "" {
+				stuck = sym
+			}
 			continue
 		}
-		return buildTokenSweep(chainId, target, retiringAddr, successorAddr, sym, amt, header)
-	}
-	for _, sym := range RegisteredSymbols() {
-		if VaultBook(target.Generation, sym).Sign() > 0 {
-			return "generation " + strconv.FormatUint(uint64(target.Generation), 10) +
-				" holds " + sym + " whose transfers reverted " + strconv.Itoa(MaxSweepReverts) +
-				" times: an owner write-off is needed before its ETH can move", nil
+		tokenAddr, info, ok := tokenBySymbol(chainId, sym)
+		if !ok {
+			return nil, nil, "", ce.NewContractError(ce.ErrStateAccess, "registered symbol "+sym+" has no token record")
 		}
+		g := TokenGasLimit(info.GasLimit)
+		feeCap, cost, err := safeGasFee(g, header.BaseFeePerGas, 2, sweepTipCap)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		plans = append(plans, tokenSweepPlan{sym: sym, token: tokenAddr, amount: amt, gas: g, limit: info.GasLimit, feeCap: feeCap, cost: cost})
+		gas.Add(gas, cost)
 	}
-
-	// ETH last.
-	if ethProof == nil {
-		return "", ce.NewContractError(ce.ErrInput, "the ETH sweep is next: send eth_proof (an account proof of the retiring address)")
-	}
-	return buildETHSweep(chainId, target, retiringAddr, successorAddr, ethProof, header)
+	return plans, gas, stuck, nil
 }
 
-func buildTokenSweep(chainId uint64, target *Vault, from, successor [20]byte, sym string, amt *big.Int, header *blocklist.EthBlockHeader) (string, error) {
-	tokenAddr, info, ok := tokenBySymbol(chainId, sym)
-	if !ok {
-		return "", ce.NewContractError(ce.ErrStateAccess, "registered symbol "+sym+" has no token record")
-	}
-	gas := TokenGasLimit(info.GasLimit)
-	feeCap, cost, err := safeGasFee(gas, header.BaseFeePerGas, 2, sweepTipCap)
-	if err != nil {
-		return "", err
-	}
-	// The gas is the retiring address's ETH, booked from the reserve.
-	if VaultBook(target.Generation, constants.NativeAsset).Cmp(cost) < 0 {
-		return "generation " + strconv.FormatUint(uint64(target.Generation), 10) + " holds too little ETH for its " + sym +
-			" sweep gas (" + cost.String() + " wei): top it up with a to_reserve deposit to " + crypto.AddressToHex(from), nil
-	}
-	if getGasReserve().Cmp(cost) < 0 {
-		return "gas reserve below the " + sym + " sweep gas (" + cost.String() + " wei): sweep waits for a reserve top-up", nil
-	}
-	nonce := SweepNonce(target.Generation)
-	unsigned := BuildERC20WithdrawalTxGas(chainId, nonce, sweepTipCap, feeCap, tokenAddr, successor, amt, info.GasLimit)
-	if err := assertSweepPaysSuccessor(unsigned, successor); err != nil {
-		return "", err
-	}
-	deductGasReserve(cost)
-	TrackReserveSpend(cost)
-	addVaultBook(target.Generation, constants.NativeAsset, new(big.Int).Neg(cost))
-	r := &SweepRecord{
-		Gen: target.Generation, Nonce: nonce, Kind: sweepKindToken, Asset: sym, Token: crypto.AddressToHex(tokenAddr),
-		Amount: amt.String(), To: crypto.AddressToHex(successor), Gas: gas, GasCost: cost.String(),
-		BuiltL1:  blocklist.GetLastHeight(),
-		Versions: []SweepVersion{{Value: "0", Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: feeCap}},
-	}
-	putSweep(r)
-	markDraining(target.Generation)
-	setSweepNonce(target.Generation, nonce+1)
-	sdk.TssSignKey(VaultKeyName(target.Generation), ComputeSighash(unsigned))
-	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(r.Gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=" + sym + "|v=" + r.Amount + "|to=" + r.To)
-	return "sweep " + sweepKey(r.Gen, nonce) + " " + sym + " " + r.Amount, nil
+func stuckTokenStatus(gen uint32, sym string) string {
+	return "generation " + strconv.FormatUint(uint64(gen), 10) + " holds " + sym + " whose transfers reverted " +
+		strconv.Itoa(MaxSweepReverts) + " times: an owner write-off is needed"
 }
 
-func buildETHSweep(chainId uint64, target *Vault, from, successor [20]byte, p *AccountProof, header *blocklist.EthBlockHeader) (string, error) {
-	nonce := SweepNonce(target.Generation)
-	if p.BlockHeight < lastBookedHeight(target.Generation) {
-		return "", ce.NewContractError(ce.ErrInput, "the balance proof is older than the generation's newest booked deposit")
+func tooLittleGasStatus(gen uint32, from [20]byte, gas *big.Int) string {
+	return "generation " + strconv.FormatUint(uint64(gen), 10) + " holds too little ETH for its token sweeps' gas (" +
+		gas.String() + " wei): top it up with a to_reserve deposit to " + crypto.AddressToHex(from)
+}
+
+type ethSweepPlan struct {
+	value  *big.Int
+	keep   *big.Int // the token sweeps' gas, kept back at the retiring address
+	gas    uint64
+	feeCap uint64
+	cost   *big.Int
+}
+
+// planETHSweep proves the retiring address's balance at the generation's next
+// nonce and prices the ETH sweep: everything less its own gas and keep. The
+// plan is nil when nothing is left to send; the proven balance is returned
+// either way.
+func planETHSweep(gen uint32, from [20]byte, p *AccountProof, keep *big.Int, header *blocklist.EthBlockHeader) (*ethSweepPlan, *big.Int, error) {
+	nonce := SweepNonce(gen)
+	if p.BlockHeight < lastBookedHeight(gen) {
+		return nil, nil, ce.NewContractError(ce.ErrInput, "the balance proof is older than the generation's newest booked deposit")
 	}
 	provenNonce, balance, err := ProvenAccount(p, from)
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	if provenNonce != nonce {
-		return "", ce.NewContractError(ce.ErrInput, "the balance proof is at L1 nonce "+strconv.FormatUint(provenNonce, 10)+
+		return nil, nil, ce.NewContractError(ce.ErrInput, "the balance proof is at L1 nonce "+strconv.FormatUint(provenNonce, 10)+
 			", the generation's next sweep is nonce "+strconv.FormatUint(nonce, 10)+": prove a block after its last sweep mined")
 	}
 	gas := defaultETHGasLimit()
 	feeCap, cost, err := safeGasFee(gas, header.BaseFeePerGas, 2, sweepTipCap)
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	value := new(big.Int).Sub(balance, cost)
+	value.Sub(value, keep)
 	if value.Sign() <= 0 {
-		return "generation " + strconv.FormatUint(uint64(target.Generation), 10) + " holds " + balance.String() +
-			" wei, not more than one sweep's gas (" + cost.String() + "): dust, for writeOffDust", nil
+		return nil, balance, nil
 	}
-	if getGasReserve().Cmp(cost) < 0 {
-		return "gas reserve below the ETH sweep gas (" + cost.String() + " wei): sweep waits for a reserve top-up", nil
-	}
-	unsigned := BuildETHWithdrawalTxGas(chainId, nonce, sweepTipCap, feeCap, successor, value, gas)
+	return &ethSweepPlan{value: value, keep: keep, gas: gas, feeCap: feeCap, cost: cost}, balance, nil
+}
+
+func buildETHSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte, e *ethSweepPlan) string {
+	unsigned := BuildETHWithdrawalTxGas(chainId, nonce, sweepTipCap, e.feeCap, successor, e.value, e.gas)
 	if err := assertSweepPaysSuccessor(unsigned, successor); err != nil {
-		return "", err
+		ce.CustomAbort(err)
 	}
-	deductGasReserve(cost)
-	TrackReserveSpend(cost)
-	addVaultBook(target.Generation, constants.NativeAsset, new(big.Int).Neg(minBig(cost, VaultBook(target.Generation, constants.NativeAsset))))
+	deductGasReserve(e.cost)
+	TrackReserveSpend(e.cost)
+	addVaultBook(gen, constants.NativeAsset, new(big.Int).Neg(minBig(e.cost, VaultBook(gen, constants.NativeAsset))))
+	// The books move what the generation holds less the token gas kept back,
+	// and never more than the transaction sends.
+	booked := new(big.Int).Sub(VaultBook(gen, constants.NativeAsset), e.keep)
+	if booked.Sign() < 0 {
+		booked.SetInt64(0)
+	}
+	booked = minBig(booked, e.value)
 	r := &SweepRecord{
-		Gen: target.Generation, Nonce: nonce, Kind: sweepKindETH, Asset: constants.NativeAsset,
-		To: crypto.AddressToHex(successor), Gas: gas, GasCost: cost.String(),
-		Booked:   VaultBook(target.Generation, constants.NativeAsset).String(),
+		Gen: gen, Nonce: nonce, Kind: sweepKindETH, Asset: constants.NativeAsset,
+		To: crypto.AddressToHex(successor), Gas: e.gas, GasCost: e.cost.String(),
+		Booked:   booked.String(),
 		BuiltL1:  blocklist.GetLastHeight(),
-		Versions: []SweepVersion{{Value: value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: feeCap}},
+		Versions: []SweepVersion{{Value: e.value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: e.feeCap}},
 	}
 	putSweep(r)
-	markDraining(target.Generation)
-	setSweepNonce(target.Generation, nonce+1)
-	sdk.TssSignKey(VaultKeyName(target.Generation), ComputeSighash(unsigned))
-	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(r.Gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=eth|v=" + value.String() + "|to=" + r.To)
-	return "sweep " + sweepKey(r.Gen, nonce) + " eth " + value.String(), nil
+	sdk.TssSignKey(VaultKeyName(gen), ComputeSighash(unsigned))
+	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=eth|v=" + e.value.String() + "|to=" + r.To)
+	return "sweep " + sweepKey(gen, nonce) + " eth " + e.value.String()
+}
+
+func buildTokenSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte, t *tokenSweepPlan) string {
+	unsigned := BuildERC20WithdrawalTxGas(chainId, nonce, sweepTipCap, t.feeCap, t.token, successor, t.amount, t.limit)
+	if err := assertSweepPaysSuccessor(unsigned, successor); err != nil {
+		ce.CustomAbort(err)
+	}
+	// The gas is the retiring address's ETH, booked from the reserve.
+	deductGasReserve(t.cost)
+	TrackReserveSpend(t.cost)
+	addVaultBook(gen, constants.NativeAsset, new(big.Int).Neg(t.cost))
+	r := &SweepRecord{
+		Gen: gen, Nonce: nonce, Kind: sweepKindToken, Asset: t.sym, Token: crypto.AddressToHex(t.token),
+		Amount: t.amount.String(), To: crypto.AddressToHex(successor), Gas: t.gas, GasCost: t.cost.String(),
+		BuiltL1:  blocklist.GetLastHeight(),
+		Versions: []SweepVersion{{Value: "0", Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: t.feeCap}},
+	}
+	putSweep(r)
+	sdk.TssSignKey(VaultKeyName(gen), ComputeSighash(unsigned))
+	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=" + t.sym + "|v=" + r.Amount + "|to=" + r.To)
+	return "sweep " + sweepKey(gen, nonce) + " " + t.sym + " " + r.Amount
 }
 
 // markDraining moves a Retiring generation to Draining once its first sweep is
