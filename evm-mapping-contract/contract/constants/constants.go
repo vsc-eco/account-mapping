@@ -240,8 +240,17 @@ const (
 const MaxInFlightWithdrawals uint64 = 8
 
 // MaxQueuedWithdrawals bounds the queue's storage; above it an unmap is refused
-// (the only remaining "busy" refusal, at a depth no normal load reaches).
-const MaxQueuedWithdrawals uint64 = 1024
+// (the only remaining "busy" refusal, at a depth no normal load reaches). It
+// counts live entries (QueuedLiveKey), not tail-head, which also counts
+// cancelled and issued slots the head has not walked past yet (A12: 1,023
+// enqueue+cancel pairs filled it for ~153 USDC). MaxQueuedPerAccount bounds
+// one account's share (QueuedPerAccountPrefix, wqa-{account}).
+const (
+	MaxQueuedWithdrawals   uint64 = 1024
+	MaxQueuedPerAccount    uint64 = 16
+	QueuedLiveKey                 = "wqn"
+	QueuedPerAccountPrefix        = "wqa" + DirPathDelimiter
+)
 
 // MaxDrainScan bounds how many queue entries one drain inspects, so a long run
 // of entries that cannot be issued yet (fee cap, reserve) stays cheap.

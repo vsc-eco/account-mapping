@@ -414,10 +414,48 @@ func Enqueue(q QueuedWithdrawal) uint64 {
 	counted := queuedDebitCounts(tail)
 	sdk.StateSetObject(queueKey(tail), string(b))
 	sdk.StateSetObject(constants.WithdrawQueueTailKey, strconv.FormatUint(tail+1, 10))
-	if counted && q.Debit != nil {
-		addQueuedDebit(q.Asset, q.Debit)
+	if counted {
+		addCounter(constants.QueuedLiveKey, 1)
+		if q.Debit != nil {
+			addQueuedDebit(q.Asset, q.Debit)
+		}
 	}
+	addCounter(constants.QueuedPerAccountPrefix+q.From, 1)
 	return tail
+}
+
+// QueuedLive is the number of queued entries (A12): exact once the
+// queued-debit counters are, before that (a queue left from before the
+// counters, being recounted) tail-head, which also counts removed slots.
+func QueuedLive() uint64 {
+	if QueueLen() == 0 {
+		return 0
+	}
+	if queuedDebitExact() {
+		return queueCounter(constants.QueuedLiveKey)
+	}
+	return QueueLen()
+}
+
+// queuedBy is how many entries account has queued since the counters existed.
+func queuedBy(account string) uint64 {
+	return queueCounter(constants.QueuedPerAccountPrefix + account)
+}
+
+// addCounter moves a non-negative counter by delta; it stops at 0 (an entry
+// queued before the counter existed is not in it) and is deleted there.
+func addCounter(key string, delta int64) {
+	n := queueCounter(key)
+	switch {
+	case delta < 0 && uint64(-delta) >= n:
+		sdk.StateDeleteObject(key)
+		return
+	case delta < 0:
+		n -= uint64(-delta)
+	default:
+		n += uint64(delta)
+	}
+	sdk.StateSetObject(key, strconv.FormatUint(n, 10))
 }
 
 // A01: the queued withdrawals' debits per asset. They were taken out of the
@@ -489,11 +527,15 @@ func StepQueuedDebitRecount() bool {
 		for _, a := range vaultAssets() {
 			sdk.StateDeleteObject(queuedDebitKey(a))
 		}
+		sdk.StateDeleteObject(constants.QueuedLiveKey)
 		cursor, end = QueueBounds()
 	}
 	for n := uint64(0); cursor < end && n < constants.MaxQueueWalk; n++ {
-		if q := GetQueued(cursor); q != nil && q.Debit != nil {
-			addQueuedDebit(q.Asset, q.Debit)
+		if q := GetQueued(cursor); q != nil {
+			addCounter(constants.QueuedLiveKey, 1)
+			if q.Debit != nil {
+				addQueuedDebit(q.Asset, q.Debit)
+			}
 		}
 		cursor++
 	}
@@ -523,6 +565,7 @@ func resetQueuedDebits() {
 	for _, a := range vaultAssets() {
 		sdk.StateDeleteObject(queuedDebitKey(a))
 	}
+	sdk.StateDeleteObject(constants.QueuedLiveKey)
 	sdk.StateSetObject(constants.QueuedDebitExactKey, "1")
 }
 
@@ -543,8 +586,14 @@ func GetQueued(seq uint64) *QueuedWithdrawal {
 func RemoveQueued(seq uint64, q *QueuedWithdrawal) {
 	counted := queuedDebitCounts(seq)
 	sdk.StateDeleteObject(queueKey(seq))
-	if counted && q != nil && q.Debit != nil {
-		addQueuedDebit(q.Asset, new(big.Int).Neg(q.Debit))
+	if q != nil {
+		if counted {
+			addCounter(constants.QueuedLiveKey, -1)
+			if q.Debit != nil {
+				addQueuedDebit(q.Asset, new(big.Int).Neg(q.Debit))
+			}
+		}
+		addCounter(constants.QueuedPerAccountPrefix+q.From, -1)
 	}
 	advanceQueueHead()
 }

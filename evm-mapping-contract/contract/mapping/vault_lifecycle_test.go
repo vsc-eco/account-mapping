@@ -238,6 +238,9 @@ func TestA01_LegacyQueueIsRecountedInSteps(t *testing.T) {
 	if got := QueuedDebit("eth"); got.Cmp(want) != 0 {
 		t.Fatalf("queued debit %s after the recount, want %s", got, want)
 	}
+	if got := QueuedLive(); got != uint64(n-2+1) {
+		t.Fatalf("live entries %d after the recount, want %d", got, n-2+1)
+	}
 	MintNextGeneration(10)
 	sdk.StubSetTssKeyFor("primaryv1", "active,"+testPub2+",ecdsa,1,1")
 	if _, _, _, err := ActivatePendingGeneration(11); err != nil {

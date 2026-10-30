@@ -3,8 +3,11 @@ package mapping
 import (
 	"math/big"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"evm-mapping-contract/contract/constants"
 
 	"evm-mapping-contract/sdk"
 )
@@ -125,5 +128,50 @@ func TestQFREEZE1_OwnerCanCancelAQueuedWithdrawal(t *testing.T) {
 	}
 	if got := GetBalance("hive:u", "eth"); got.Cmp(before) != 0 || QueueLen() != 0 || GetBalance("hive:owner", "eth").Sign() != 0 {
 		t.Fatalf("after the owner's cancel: hive:u %s (want %s), queue %d, owner balance %s; debit %s must go to hive:u", got, before, QueueLen(), GetBalance("hive:owner", "eth"), q.Debit)
+	}
+}
+
+// A12: the queue cap counts live entries. One entry parked at the head and
+// 1,100 enqueue+cancel pairs behind it used to fill the 1,024 slots (tail-head)
+// and refuse every honest withdrawal; now the queue holds 1 and takes more.
+// One account holds at most MaxQueuedPerAccount entries.
+func TestA12_QueueCapCountsLiveEntriesAndPerAccount(t *testing.T) {
+	rpBridge(t, new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18)), "hive:alice")
+	SetPendingNonce(constants.MaxInFlightWithdrawals) // every slot in flight: requests queue
+	entry := func(from string) QueuedWithdrawal {
+		return QueuedWithdrawal{From: from, To: "0x00000000000000000000000000000000000000e2", Asset: "eth", Amount: big.NewInt(1), Debit: big.NewInt(1)}
+	}
+	Enqueue(entry("hive:mallory")) // parked at the head
+	for i := 0; i < 1100; i++ {
+		seq := Enqueue(entry("hive:mallory"))
+		RemoveQueued(seq, GetQueued(seq))
+	}
+	if QueueLen() < constants.MaxQueuedWithdrawals || QueuedLive() != 1 {
+		t.Fatalf("tail-head %d, live %d: want the churn behind the head, 1 live", QueueLen(), QueuedLive())
+	}
+	if out, err := submitWithdrawal(entry("hive:alice"), [20]byte{1}, 1); err != nil || !strings.HasPrefix(out, "queued:") {
+		t.Fatalf("honest withdrawal after the churn: %q %v", out, err)
+	}
+
+	// The per-account cap: mallory has 1 queued; 15 more fit, the 17th not.
+	for i := uint64(1); i < constants.MaxQueuedPerAccount; i++ {
+		if _, err := submitWithdrawal(entry("hive:mallory"), [20]byte{1}, 1); err != nil {
+			t.Fatalf("mallory's entry %d: %v", i+1, err)
+		}
+	}
+	if _, err := submitWithdrawal(entry("hive:mallory"), [20]byte{1}, 1); err == nil || !strings.Contains(err.Error(), "withdrawals queued") {
+		t.Fatalf("mallory's 17th entry: %v, want the per-account cap", err)
+	}
+	if _, err := submitWithdrawal(entry("hive:bob"), [20]byte{1}, 1); err != nil {
+		t.Fatalf("another account under mallory's cap: %v", err)
+	}
+	// A cancel frees mallory a slot.
+	head, _ := QueueBounds()
+	RemoveQueued(head, GetQueued(head))
+	if _, err := submitWithdrawal(entry("hive:mallory"), [20]byte{1}, 1); err != nil {
+		t.Fatalf("mallory after a cancel: %v", err)
+	}
+	if QueuedLive() != constants.MaxQueuedPerAccount+2 {
+		t.Fatalf("live %d, want mallory's %d + alice + bob", QueuedLive(), constants.MaxQueuedPerAccount)
 	}
 }

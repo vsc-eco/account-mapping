@@ -40,8 +40,12 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 			}
 		}
 	}
-	if QueueLen() >= constants.MaxQueuedWithdrawals {
+	if QueuedLive() >= constants.MaxQueuedWithdrawals {
 		return "", ce.NewContractError(ce.ErrIntent, "withdrawal queue is full; try again later")
+	}
+	if queuedBy(q.From) >= constants.MaxQueuedPerAccount {
+		return "", ce.NewContractError(ce.ErrIntent, "you have "+strconv.FormatUint(constants.MaxQueuedPerAccount, 10)+
+			" withdrawals queued; wait for them to go out (or cancel one) before queuing another")
 	}
 	seq := Enqueue(q)
 	logQueued(seq, &q)
