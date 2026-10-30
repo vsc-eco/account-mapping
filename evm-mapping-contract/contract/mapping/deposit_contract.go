@@ -181,6 +181,9 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 	if d.amount.Sign() <= 0 {
 		return ce.NewContractError(ce.ErrInput, "deposit amount must be positive")
 	}
+	if targets.ownAddress(d.sender) {
+		return errOwnTransfer
+	}
 	dest := crypto.AddressToDID(d.sender)
 	if validIdentity(d.recipient) {
 		dest = d.recipient

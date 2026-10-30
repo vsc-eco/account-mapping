@@ -85,6 +85,9 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		if err != nil {
 			return err
 		}
+		if targets.ownAddress(sender) {
+			return errOwnTransfer
+		}
 
 		amount := new(big.Int).SetBytes(amountBytes)
 		if amount.Sign() <= 0 {
@@ -164,6 +167,9 @@ func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		sender, amountBytes, txHash, err := VerifyERC20Deposit(req, targets.isVault, tokenAddr, chainId)
 		if err != nil {
 			return err
+		}
+		if targets.ownAddress(sender) {
+			return errOwnTransfer
 		}
 
 		amount := new(big.Int).SetBytes(amountBytes)

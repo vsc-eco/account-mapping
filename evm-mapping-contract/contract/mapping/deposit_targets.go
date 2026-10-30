@@ -2,6 +2,8 @@ package mapping
 
 import (
 	"math/big"
+
+	ce "evm-mapping-contract/contract/contracterrors"
 )
 
 // A01: a deposit is credited when it paid any fund-holding generation's address
@@ -27,6 +29,20 @@ func newDepositTargets(vault [20]byte) *depositTargetSet {
 	}
 	return t
 }
+
+// ownAddress reports whether a is one of the vault's own addresses: a
+// fund-holding generation's, or the single vault a contract with no registry
+// uses. Those are the only vault addresses that can send (a pending generation
+// holds nothing, a purged one is empty). A transfer from one of them is the
+// vault moving its own funds (a migration sweep, or a withdrawal paid to a
+// vault address), never a deposit: crediting it would mint the moved amount a
+// second time.
+func (t *depositTargetSet) ownAddress(a [20]byte) bool {
+	return t.find(a) != nil
+}
+
+// errOwnTransfer refuses a "deposit" sent by the vault itself.
+var errOwnTransfer = ce.NewContractError(ce.ErrInput, "the sender is one of the vault's own addresses: a sweep or a withdrawal to the vault, not a deposit")
 
 func (t *depositTargetSet) find(a [20]byte) *fundHoldingGen {
 	for i := range t.gens {

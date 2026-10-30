@@ -294,3 +294,31 @@ func TestERC20PAYLOAD1_Base64ReceiptProof(t *testing.T) {
 		t.Fatal("another block's receipt proof was accepted")
 	}
 }
+
+// A transfer from one of the vault's own addresses (a migration sweep between
+// generations, or a withdrawal paid to the vault) is not a deposit: crediting
+// it mints the moved amount a second time (A01 devnet weather wave: the ETH
+// sweep was mapped and the books ran 6 ETH over custody). Mapping is
+// permissionless, so the contract refuses it on every deposit path.
+func TestOwnTransfer_TheVaultsOwnTransferIsNotADeposit(t *testing.T) {
+	w := newRP7World(t)
+	n, _, nodes := w.mine(1, depositLog(DepositContractAddress(rp7Vault), rp7Vault, [20]byte{}, big.NewInt(1e18), "hive:bob"))
+	if err := mapContract(n, nodes, 0); err == nil || !strings.Contains(err.Error(), "vault's own addresses") {
+		t.Fatalf("a MagiDeposit deposit sent by the vault: %v", err)
+	}
+	n, receipt, nodes := w.mine(1, transferLog(rp7USDC, rp7Vault, rp7Vault, 5000))
+	if err := mapERC20(n, receipt, nodes, 0); err == nil || !strings.Contains(err.Error(), "vault's own addresses") {
+		t.Fatalf("a token transfer from the vault to the vault: %v", err)
+	}
+	if got := GetBalance(crypto.AddressToDID(rp7Vault), "USDC"); got.Sign() != 0 {
+		t.Fatalf("the vault's own address was credited %s USDC", got)
+	}
+	if s := GetSupply("USDC"); s.User.Sign() != 0 || s.Active.Sign() != 0 {
+		t.Fatalf("supply moved: %+v", s)
+	}
+	// A user's deposit still lands.
+	n, receipt, nodes = w.mine(1, transferLog(rp7USDC, rp7User, rp7Vault, 5000))
+	if err := mapERC20(n, receipt, nodes, 0); err != nil {
+		t.Fatalf("a user's token deposit: %v", err)
+	}
+}
