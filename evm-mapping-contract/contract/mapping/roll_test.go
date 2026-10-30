@@ -363,3 +363,56 @@ func TestA24_ResignsNeedAnActiveKeyAndProvenDropsSignNothing(t *testing.T) {
 		t.Fatalf("roll with the key deprecated: %v", err)
 	}
 }
+
+// A14: a replacement or a roll may burn more L1 gas than the withdrawal
+// prepaid; the extra comes from the gas reserve (and the custody) when it is
+// signed, never more than once per price, and a roll is not refused when the
+// reserve is short (the debt is logged).
+func TestA14_ResignGasIsBooked(t *testing.T) {
+	defer sdk.ResetStubState()
+	w := newRollWorld(t)
+	sdk.StateSetObject(constants.GasReserveKey, "1000000000000000") // 0.001 ETH
+	SetSupply("eth", Supply{Active: wei("1000000000000000"), User: new(big.Int), Fee: new(big.Int)})
+	ps := GetPendingSpend(0)
+	ps.GasCost = big.NewInt(84_000_000_000_000) // 21,000 gas at 4 gwei, prepaid
+	StorePendingSpend(*ps)
+	if err := HandleReplaceWithdrawal([20]byte{}, 1); err != nil {
+		t.Fatal(err)
+	}
+	// 3x the 1 gwei base fee + 4 gwei tip = 7 gwei: 147e12 max, 63e12 more.
+	if got := getGasReserve(); got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("reserve %s after the replacement, want 937000000000000", got)
+	}
+	if got := GetSupply("eth").Active; got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("custody %s, want the replacement gas out of it", got)
+	}
+	if got := GetPendingSpend(0).GasCost; got.Cmp(big.NewInt(147_000_000_000_000)) != 0 {
+		t.Fatalf("prepaid %s, want 147e12", got)
+	}
+	// The roll at the same price can burn no more: nothing more is booked.
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	w.l2 += constants.ReplaceWithdrawalCooldown
+	w.caller("hive:carol")
+	if err := w.roll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := getGasReserve(); got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("reserve %s after a roll at the same price", got)
+	}
+
+	// A short reserve: the roll goes through, the reserve is emptied, the debt
+	// is logged.
+	w = newRollWorld(t)
+	sdk.StateSetObject(constants.GasReserveKey, "1000")
+	SetSupply("eth", Supply{Active: wei("1000"), User: new(big.Int), Fee: new(big.Int)})
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err != nil {
+		t.Fatalf("roll with a short reserve: %v", err)
+	}
+	logs := sdk.TestLogs()
+	if getGasReserve().Sign() != 0 || len(logs) == 0 || !strings.Contains(strings.Join(logs, "\n"), "gasdebt|n=0|v=146999999999000") {
+		t.Fatalf("reserve %s, logs %v: want it emptied and the rest logged", getGasReserve(), logs)
+	}
+}

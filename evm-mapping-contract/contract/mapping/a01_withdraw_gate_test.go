@@ -235,10 +235,17 @@ func TestA01_CutOverWithAWithdrawalInFlight(t *testing.T) {
 	if DrainWithdrawalQueue(1, 8) != 0 {
 		t.Fatal("issued at a nonce generation 0 still holds")
 	}
-	// Generation 0's withdrawal is re-priced: by its own key.
+	// Generation 0's withdrawal is re-priced: by its own key, its extra gas
+	// (A14) out of generation 0's books (it burns at generation 0's address).
 	before := signRequestsFor("primary")
+	setVaultBook(0, "eth", wei("1000000000000000000"))
+	reserve := getGasReserve()
 	if err := HandleReplaceWithdrawal(gen1, 1); err != nil {
 		t.Fatal(err)
+	}
+	charged := new(big.Int).Sub(reserve, getGasReserve())
+	if charged.Sign() <= 0 || new(big.Int).Sub(wei("1000000000000000000"), VaultBook(0, "eth")).Cmp(charged) != 0 {
+		t.Fatalf("replacement gas %s, generation 0 eth book %s: want the gas out of both", charged, VaultBook(0, "eth"))
 	}
 	if signRequestsFor("primary") != before+1 || signRequestsFor("primaryv1") != 0 {
 		t.Fatalf("replacement signed by %v, want generation 0's key", sdk.TestSignRequests())

@@ -479,6 +479,39 @@ func logUnmap(ps PendingSpend, debited *big.Int, gasFromUser bool) {
 // paused) and authorizes no new spend. Gated, a pause outlasting the verifier's
 // header retention pruned the mined withdrawal's header, after which nothing
 // could confirm it or prove it dropped: every withdrawal stayed frozen.
+// chargeResignGas books the L1 gas a replacement or a roll of ps can burn
+// beyond what ps prepaid (A14): gas units at feeCap, less ps.GasCost. Only one
+// transaction at the nonce mines, so the prepaid amount grows to the dearest
+// version signed. It comes from the gas reserve, as ERC-20 withdrawal gas
+// does, and from the books of a superseded generation that sent ps (A01). At
+// most what the reserve holds is taken: a roll is how a stuck queue gets free
+// and is never refused for gas; a shortfall is logged (gasdebt) for the
+// operator's books-vs-L1 alarm. Before, this gas was booked nowhere and
+// the 1% deposit tax surplus hid the drift.
+func chargeResignGas(ps *PendingSpend, gasUnits, feeCap uint64) {
+	maxFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUnits), new(big.Int).SetUint64(feeCap))
+	prepaid := new(big.Int)
+	if ps.GasCost != nil {
+		prepaid.Set(ps.GasCost)
+	}
+	extra := new(big.Int).Sub(maxFee, prepaid)
+	if extra.Sign() <= 0 {
+		return
+	}
+	charged := minBig(extra, getGasReserve())
+	if charged.Sign() > 0 {
+		deductGasReserve(charged)
+		TrackReserveSpend(charged)
+		if g, ok := SpendGen(ps); ok && g.Status != VaultStatusActive {
+			addVaultBook(g.Generation, constants.NativeAsset, new(big.Int).Neg(minBig(charged, VaultBook(g.Generation, constants.NativeAsset))))
+		}
+	}
+	ps.GasCost = prepaid.Add(prepaid, charged)
+	if short := new(big.Int).Sub(extra, charged); short.Sign() > 0 {
+		sdk.Log("gasdebt|n=" + strconv.FormatUint(ps.Nonce, 10) + "|v=" + short.String())
+	}
+}
+
 // errRefundWhilePaused: A04, as THORChain's chain halt stops the value path. A
 // refund credits balances on the strength of an L1 proof; while the bridge is
 // paused (an incident, such as a suspect verifier) refunds wait for the
@@ -1533,6 +1566,11 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	if err := requireSpendKey(ps); err != nil {
 		return err
 	}
+	gasUnits := ETHGasLimit(ps.GasLimit)
+	if ps.Asset != constants.NativeAsset {
+		gasUnits = TokenGasLimit(ps.GasLimit)
+	}
+	chargeResignGas(ps, gasUnits, gasFeeCap)
 	sighash := ComputeSighash(unsigned)
 	sdk.TssSignKey(spendKeyName(ps), sighash)
 
@@ -1817,6 +1855,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 		return ce.NewContractError(ce.ErrArithmetic, "gas fee cap overflow", "rollWithdrawal")
 	}
 	unsigned := BuildETHWithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, snapshottedVault, big.NewInt(0))
+	chargeResignGas(ps, constants.ETHTransferGas, gasFeeCap)
 	sdk.TssSignKey(spendKeyName(ps), ComputeSighash(unsigned))
 	sdk.StateSetObject(cooldownKey, strconv.FormatUint(env.BlockHeight, 10))
 	ps.Rolled = true
