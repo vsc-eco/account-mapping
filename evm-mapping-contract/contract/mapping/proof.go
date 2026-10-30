@@ -295,13 +295,26 @@ func VerifyERC20Deposit(
 			"this transfer paid a MagiDeposit deposit: map its Deposit log (deposit_type contract)")
 	}
 
-	// Amount from log.Data (uint256, big-endian)
-	amount := log.Data
+	amount, err := transferLogAmount(log.Data)
+	if err != nil {
+		return sender, nil, txHash, err
+	}
 
 	// CRIT #8 / W4 Cluster A: MarkObserved is NOT called here. The caller
 	// (HandleMap) records the observed slot only after the full deposit
 	// pipeline succeeds.
 	return sender, amount, txHash, nil
+}
+
+// transferLogAmount reads the amount of an ERC-20 Transfer log. A standard
+// Transfer carries exactly one uint256 word; anything else (a non-standard or
+// upgraded token) is refused, so the credit can never exceed what the word
+// says (as confirmSpend and the MagiDeposit path already bound it). A06.
+func transferLogAmount(data []byte) ([]byte, error) {
+	if len(data) != 32 {
+		return nil, ce.NewContractError(ce.ErrInput, "Transfer data must be one 32-byte amount")
+	}
+	return data, nil
 }
 
 // parseTransaction decodes an RLP-encoded Ethereum transaction: legacy, or an
