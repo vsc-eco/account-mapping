@@ -1190,8 +1190,14 @@ func TssVaultAddress() ([20]byte, bool) {
 	return GenAddress(&v)
 }
 
-func requireTssKey() error {
-	keyInfo := sdk.TssGetKey(ActiveKeyName())
+func requireTssKey() error { return requireKeyActive(ActiveKeyName()) }
+
+// requireSpendKey requires the key that signs for ps (its generation's, A01)
+// to be active.
+func requireSpendKey(ps *PendingSpend) error { return requireKeyActive(spendKeyName(ps)) }
+
+func requireKeyActive(name string) error {
+	keyInfo := sdk.TssGetKey(name)
 	if keyInfo == "" || keyInfo == "fail" {
 		return ce.NewContractError(ce.ErrAuth, "TSS key not available")
 	}
@@ -1522,6 +1528,11 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 		unsigned = BuildERC20WithdrawalTxGas(chainId, confirmedNonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, ps.Amount, ps.GasLimit)
 	}
 
+	// A24: a key that is not active is never signed with (the host drops the
+	// request silently), and the replacement would then stand unsigned.
+	if err := requireSpendKey(ps); err != nil {
+		return err
+	}
 	sighash := ComputeSighash(unsigned)
 	sdk.TssSignKey(spendKeyName(ps), sighash)
 
@@ -1582,7 +1593,7 @@ func refundDroppedWithdrawal(ps *PendingSpend) {
 	bookSpendRefund(ps, refund)
 }
 
-func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop) error {
+func HandleClearNonce(chainId uint64, proof L1ProofOfDrop) error {
 	if isPaused() {
 		return ce.NewContractError(ce.ErrInitialization, "contract is paused")
 	}
@@ -1598,22 +1609,12 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 		return ce.WrapContractError(ce.ErrTransaction, err, "L1ProofOfDrop verify failed")
 	}
 
-	// Build 0-value self-transfer to advance nonce
-	unsigned := BuildETHWithdrawalTx(
-		chainId,
-		confirmedNonce,
-		4_000_000_000,
-		100_000_000_000,
-		spendAddress(ps, vaultAddress),
-		big.NewInt(0),
-	)
-	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey(spendKeyName(ps), sighash)
-
-	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
-	// big.Int refundDroppedWithdrawal cannot overflow, so it subsumes 30710e4's
-	// int64 X2 hard-fail guards; it also refunds the prepaid fee/reserve, which
-	// the int64 value-only refund did not.
+	// A24: no 0-value self-transfer is signed here. The proof (a reverted
+	// receipt, the only type accepted) shows the nonce already spent on L1, so
+	// such a transfer could never mine; it was a sign request for nothing, and
+	// with the key not active the host dropped it silently.
+	//
+	// Proven-reverted refund: the value only (E9); the gas was spent.
 	refundDroppedWithdrawal(ps)
 	// bug #8: NonceAdvance re-reads the PendingSpend and no-ops once it's
 	// deleted, so advance BEFORE DeletePendingSpend (race-safe vs HandleExpireWithdrawal).
@@ -1707,7 +1708,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 
 // HandleCancelMyWithdrawal — W4 Cluster E CRIT #26 companion. Only ps.From
 // can call; proof MANDATORY.
-func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [20]byte, chainId uint64) error {
+func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) error {
 	if isPaused() {
 		return errors.New("contract is paused")
 	}
@@ -1738,14 +1739,10 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 	if err := verifyL1ProofOfDrop(&proof, ps, chainId); err != nil {
 		return errors.New("L1ProofOfDrop verify failed: " + err.Error())
 	}
-	// TSS-sign self-transfer to roll the L1 vault nonce.
-	unsigned := BuildETHWithdrawalTx(chainId, nonce, 4_000_000_000, 100_000_000_000, spendAddress(ps, vaultAddress), big.NewInt(0))
-	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey(spendKeyName(ps), sighash)
-
-	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
-	// big.Int refundDroppedWithdrawal cannot overflow (subsumes 30710e4's int64
-	// X2 guards) and also refunds the prepaid fee/reserve.
+	// A24: no self-transfer is signed (see HandleClearNonce): the proven nonce
+	// is already spent on L1.
+	//
+	// Proven-reverted refund: the value only (E9); the gas was spent.
 	refundDroppedWithdrawal(ps)
 	// bug #8: advance BEFORE delete (NonceAdvance no-ops once PendingSpend gone).
 	NonceAdvance(ps, 1)
@@ -1795,7 +1792,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 	if _, ok := SpendGen(ps); vaultAddress != snapshottedVault && !ok {
 		return errors.New("rollWithdrawal: the TSS key no longer holds the vault this withdrawal was queued from")
 	}
-	if err := requireTssKey(); err != nil {
+	if err := requireSpendKey(ps); err != nil {
 		return err
 	}
 	if last := blocklist.GetLastHeight(); last < ps.BlockHeight+constants.WithdrawalRollWindow {
@@ -2088,13 +2085,4 @@ func replaceCooldownKey(ps *PendingSpend, nonce uint64) string {
 			constants.DirPathDelimiter + strconv.FormatUint(nonce, 10)
 	}
 	return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(nonce, 10)
-}
-
-// spendAddress is the address ps spends from (its VaultAtQueue), for a 0-value
-// self-transfer at its nonce; fallback when the record has none.
-func spendAddress(ps *PendingSpend, fallback [20]byte) [20]byte {
-	if a, err := crypto.HexToAddress(ps.VaultAtQueue); err == nil && a != ([20]byte{}) {
-		return a
-	}
-	return fallback
 }

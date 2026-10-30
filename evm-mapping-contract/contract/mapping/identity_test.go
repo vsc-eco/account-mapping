@@ -69,7 +69,7 @@ func TestC6_OriginalWithdrawerIsRecognisedUnderAnyCasing(t *testing.T) {
 	const canon = "did:pkh:eip155:1:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 	const lower = "did:pkh:eip155:1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 	for name, op := range map[string]func() error{
-		"cancelMyWithdrawal": func() error { return HandleCancelMyWithdrawal(0, L1ProofOfDrop{}, [20]byte{1}, 1) },
+		"cancelMyWithdrawal": func() error { return HandleCancelMyWithdrawal(0, L1ProofOfDrop{}, 1) },
 		"expireWithdrawal":   func() error { return HandleExpireWithdrawal(0, L1ProofOfDrop{}, 1) },
 	} {
 		sdk.ResetTestState()

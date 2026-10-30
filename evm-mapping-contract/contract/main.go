@@ -684,7 +684,7 @@ func cancelMyWithdrawal(input *string) *string {
 	if err := json.Unmarshal([]byte(*input), &params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "cancelMyWithdrawal: bad payload"))
 	}
-	if err := mapping.HandleCancelMyWithdrawal(params.Nonce, params.Proof, vault(), chainId()); err != nil {
+	if err := mapping.HandleCancelMyWithdrawal(params.Nonce, params.Proof, chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
 	return nil
@@ -807,7 +807,7 @@ func dispatchAdmin(action string, payload []byte) {
 		if err := json.Unmarshal(payload, &p); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "clearNonce: bad payload"))
 		}
-		if err := mapping.HandleClearNonce(vault(), chainId(), p.Proof); err != nil {
+		if err := mapping.HandleClearNonce(chainId(), p.Proof); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 		}
 

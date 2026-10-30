@@ -322,3 +322,44 @@ func TestE22_ExpireWindowIsCountedInL1Blocks(t *testing.T) {
 		t.Fatalf("a stranger past the L1 window: %v, want the gate open and the proof checked", err)
 	}
 }
+
+// dropProof is the reverted-receipt proof of drop for the confirmSpend request
+// req (its tx mined and reverted).
+func dropProof(req *ConfirmSpendRequest, nonce uint64) L1ProofOfDrop {
+	return L1ProofOfDrop{Type: L1ProofTypeRevertedReceipt, BlockHeight: req.BlockHeight, TxIndex: req.TxIndex, TxNonce: nonce,
+		ReceiptProof: req.ReceiptProof, TxProof: req.TxProof}
+}
+
+// A24: clearing or cancelling a withdrawal whose tx is proven reverted signs
+// nothing (its nonce is spent on L1, a self-transfer there could never mine);
+// a replacement or a roll with the signing key not active is refused before
+// anything is stored (the host would drop the sign request and the stored tx
+// would stand unsigned).
+func TestA24_ResignsNeedAnActiveKeyAndProvenDropsSignNothing(t *testing.T) {
+	defer sdk.ResetStubState()
+	w := newRollWorld(t)
+	w.caller("hive:alice")
+	before := len(sdk.TestSignRequests())
+	proof := dropProof(w.mine(101, GetPendingSpend(0).UnsignedTxHex, 0), 0)
+	if err := HandleCancelMyWithdrawal(0, proof, 1); err != nil {
+		t.Fatalf("cancelMyWithdrawal with a proven revert: %v", err)
+	}
+	if n := len(sdk.TestSignRequests()) - before; n != 0 || GetBalance("hive:alice", "eth").Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("%d sign requests, balance %s: want none and the value refunded", n, GetBalance("hive:alice", "eth"))
+	}
+
+	w = newRollWorld(t)
+	sdk.StubSetTssKey("deprecated,02aa,ecdsa")
+	stored := GetPendingSpend(0).UnsignedTxHex
+	if err := HandleReplaceWithdrawal([20]byte{}, 1); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("replace with the key deprecated: %v", err)
+	}
+	if GetPendingSpend(0).UnsignedTxHex != stored || sdk.StateGetObject(replaceCooldownKey(GetPendingSpend(0), 0)) != nil {
+		t.Fatal("a refused replace stored a tx or started the cooldown")
+	}
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("roll with the key deprecated: %v", err)
+	}
+}
