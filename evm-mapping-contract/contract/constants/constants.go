@@ -161,6 +161,11 @@ const ETHGasLimitKey = "egl"
 const ProofFeePrefix = "pf-"
 const ProofFeeRecipient = "hive:altera.app"
 
+// RevertFeeRecipient receives an ERC-20 withdrawal's revert fee (USDC-1): the
+// operator, who pays for the proofs and tops up the ETH gas reserve that paid
+// the reverted transfer's gas (A35: it went to the contract owner).
+const RevertFeeRecipient = ProofFeeRecipient
+
 // Minimum withdrawal amounts (in token-native units).
 // big.Int/wei migration: native ETH accounting is now full wei (18 decimals),
 // no gwei scaling. These thresholds are bounded config values (well within

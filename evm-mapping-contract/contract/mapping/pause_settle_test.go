@@ -118,3 +118,55 @@ func TestA36_TokenWithdrawalNeedsItsTransfer(t *testing.T) {
 		t.Fatalf("paid withdrawal: %v, balance %s n=%d", err, GetBalance("hive:alice", "usdc"), GetConfirmedNonce())
 	}
 }
+
+// A35 + N-01: a reverted ERC-20 withdrawal is refunded less its revert fee
+// whichever path proves the revert (confirmSpend, or the withdrawer's own
+// cancelMyWithdrawal with the same receipt, which used to refund it all), and
+// the fee goes to RevertFeeRecipient, not the contract owner. A rolled
+// withdrawal (stuck, never reverted) is refunded in full.
+func TestA35N01_RevertFeeOnEveryProvenRevert(t *testing.T) {
+	defer sdk.ResetStubState()
+	fee := big.NewInt(1_000_000)
+	for _, path := range []string{"confirmSpend", "cancelMyWithdrawal"} {
+		w, _, _, amt := erc20RollWorld(t)
+		sdk.SetTestEnvKey("contract.owner", "hive:owner")
+		ps := GetPendingSpend(0)
+		ps.RevertFee = fee
+		StorePendingSpend(*ps)
+		req := w.mine(101, ps.UnsignedTxHex, 0)
+		req.IntentAsset, req.IntentAmount = "usdc", amt.String()
+		var err error
+		if path == "confirmSpend" {
+			err = HandleConfirmSpend(req, 1)
+		} else {
+			w.caller("hive:alice")
+			err = HandleCancelMyWithdrawal(0, dropProof(req, 0), 1)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		want := new(big.Int).Sub(amt, fee)
+		if GetBalance("hive:alice", "usdc").Cmp(want) != 0 || GetBalance(constants.RevertFeeRecipient, "usdc").Cmp(fee) != 0 || GetBalance("hive:owner", "usdc").Sign() != 0 {
+			t.Errorf("%s: withdrawer %s (want %s), fee recipient %s (want %s), owner %s (want 0)", path,
+				GetBalance("hive:alice", "usdc"), want, GetBalance(constants.RevertFeeRecipient, "usdc"), fee, GetBalance("hive:owner", "usdc"))
+		}
+	}
+	// Rolled (stuck, not reverted): no revert fee.
+	w, _, _, amt := erc20RollWorld(t)
+	ps := GetPendingSpend(0)
+	ps.RevertFee = fee
+	StorePendingSpend(*ps)
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err != nil {
+		t.Fatal(err)
+	}
+	req := w.mine(w.last+1, GetPendingSpend(0).UnsignedTxHex, 1)
+	req.IntentAsset, req.IntentAmount = "usdc", amt.String()
+	if err := HandleConfirmSpend(req, 1); err != nil {
+		t.Fatal(err)
+	}
+	if GetBalance("hive:alice", "usdc").Cmp(amt) != 0 || GetBalance(constants.RevertFeeRecipient, "usdc").Sign() != 0 {
+		t.Fatalf("rolled: withdrawer %s, fee recipient %s: want the whole amount back and no fee", GetBalance("hive:alice", "usdc"), GetBalance(constants.RevertFeeRecipient, "usdc"))
+	}
+}

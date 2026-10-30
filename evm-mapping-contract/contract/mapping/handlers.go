@@ -717,29 +717,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		// big.Int/wei: IncBalance and the supply adds cannot overflow, so the
 		// int64 best-effort/drift-marker path from 30710e4 is unnecessary here.
 		//
-		// USDC-1 (option B): an ERC-20 withdrawal keeps its token's revert fee
-		// (snapshotted at request) out of the refund, credited to the contract
-		// owner, so a deliberately reverting withdrawal (e.g. to a blacklisted
-		// address) is no longer free while the ETH reserve pays its gas. Both
-		// the refund and the fee are user-attributed balances again.
-		refund := new(big.Int).Set(ps.Amount)
-		if ps.Asset != constants.NativeAsset && ps.RevertFee != nil && ps.RevertFee.Sign() > 0 {
-			if owner := sdk.GetEnvKey("contract.owner"); owner != nil && *owner != "" {
-				fee := new(big.Int).Set(ps.RevertFee)
-				if fee.Cmp(refund) > 0 {
-					fee.Set(refund)
-				}
-				refund.Sub(refund, fee)
-				IncBalance(*owner, ps.Asset, fee)
-				sdk.Log("revertfee|n=" + strconv.FormatUint(confirmedNonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + *owner)
-			}
-		}
-		IncBalance(ps.From, ps.Asset, refund)
-		s := GetSupply(ps.Asset)
-		s.Active.Add(s.Active, ps.Amount)
-		s.User.Add(s.User, ps.Amount)
-		SetSupply(ps.Asset, s)
-		bookSpendRefund(ps, ps.Amount)
+		refundRevertedWithdrawal(ps)
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
 	}
@@ -1631,6 +1609,32 @@ func refundDroppedWithdrawal(ps *PendingSpend) {
 	bookSpendRefund(ps, refund)
 }
 
+// refundRevertedWithdrawal refunds a withdrawal whose L1 transaction is proven
+// to have mined and reverted: confirmSpend's revert branch, and the
+// reverted-receipt drop proof that clearNonce, cancelMyWithdrawal and
+// expireWithdrawal take (N-01: those skipped the revert fee, so a withdrawer
+// who submitted the proof before the relayer's confirmSpend kept it). The value
+// only comes back, the gas was spent; an ERC-20 withdrawal keeps its token's
+// revert fee (snapshotted at request, USDC-1) out of the refund, so a
+// deliberately reverting withdrawal is not free while the ETH reserve pays its
+// gas. The fee goes to RevertFeeRecipient, the operator who funds the reserve,
+// not the contract owner (A35). Both are user-attributed balances.
+func refundRevertedWithdrawal(ps *PendingSpend) {
+	refund := new(big.Int).Set(ps.Amount)
+	if ps.Asset != constants.NativeAsset && ps.RevertFee != nil && ps.RevertFee.Sign() > 0 {
+		fee := minBig(ps.RevertFee, refund)
+		refund.Sub(refund, fee)
+		IncBalance(constants.RevertFeeRecipient, ps.Asset, fee)
+		sdk.Log("revertfee|n=" + strconv.FormatUint(ps.Nonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + constants.RevertFeeRecipient)
+	}
+	IncBalance(ps.From, ps.Asset, refund)
+	sup := GetSupply(ps.Asset)
+	sup.Active.Add(sup.Active, ps.Amount)
+	sup.User.Add(sup.User, ps.Amount)
+	SetSupply(ps.Asset, sup)
+	bookSpendRefund(ps, ps.Amount)
+}
+
 func HandleClearNonce(chainId uint64, proof L1ProofOfDrop) error {
 	if isPaused() {
 		return ce.NewContractError(ce.ErrInitialization, "contract is paused")
@@ -1652,8 +1656,9 @@ func HandleClearNonce(chainId uint64, proof L1ProofOfDrop) error {
 	// such a transfer could never mine; it was a sign request for nothing, and
 	// with the key not active the host dropped it silently.
 	//
-	// Proven-reverted refund: the value only (E9); the gas was spent.
-	refundDroppedWithdrawal(ps)
+	// Proven-reverted refund (N-01): the value only (E9), less an ERC-20's
+	// revert fee, as confirmSpend gives.
+	refundRevertedWithdrawal(ps)
 	// bug #8: NonceAdvance re-reads the PendingSpend and no-ops once it's
 	// deleted, so advance BEFORE DeletePendingSpend (race-safe vs HandleExpireWithdrawal).
 	NonceAdvance(ps, 1)
@@ -1727,10 +1732,9 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 		return errors.New("L1ProofOfDrop verify failed: " + err.Error())
 	}
 
-	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
-	// big.Int refundDroppedWithdrawal cannot overflow (subsumes 30710e4's int64
-	// X2 guards) and also refunds the prepaid fee/reserve.
-	refundDroppedWithdrawal(ps)
+	// N-01: the proof is a reverted receipt, so this is the reverted refund,
+	// revert fee included, as confirmSpend would give.
+	refundRevertedWithdrawal(ps)
 	// bug #8: advance BEFORE delete (NonceAdvance no-ops once PendingSpend gone).
 	NonceAdvance(ps, 1)
 	// RP-11: no pending-nonce reset (see HandleClearNonce).
@@ -1780,8 +1784,9 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64)
 	// A24: no self-transfer is signed (see HandleClearNonce): the proven nonce
 	// is already spent on L1.
 	//
-	// Proven-reverted refund: the value only (E9); the gas was spent.
-	refundDroppedWithdrawal(ps)
+	// Proven-reverted refund (N-01): the value only (E9), less an ERC-20's
+	// revert fee, as confirmSpend gives.
+	refundRevertedWithdrawal(ps)
 	// bug #8: advance BEFORE delete (NonceAdvance no-ops once PendingSpend gone).
 	NonceAdvance(ps, 1)
 	// RP-11: no pending-nonce reset (see HandleClearNonce).
