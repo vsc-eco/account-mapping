@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -126,13 +127,10 @@ func TestA01_RotationGates(t *testing.T) {
 	_, _, _, err = ActivatePendingGeneration(11)
 	mustErr(t, err, "check signature")
 
-	// F1: a withdrawal in flight on the active generation blocks the cut-over.
+	// ROT-HALT-1: a withdrawal in flight does not hold the cut-over back.
 	sdk.StubSetTssKeyFor("primaryv1", "active,"+testPub2+",ecdsa,1,1")
 	SetPendingNonce(4)
 	SetConfirmedNonce(3)
-	_, _, _, err = ActivatePendingGeneration(11)
-	mustErr(t, err, "in flight")
-	SetConfirmedNonce(4)
 
 	// Nothing changed by the refusals.
 	if v, _ := ActiveVault(); v.Generation != 0 {
@@ -147,6 +145,24 @@ func TestA01_RotationGates(t *testing.T) {
 	if active != 1 || next != 2 || vaults[0].Status != VaultStatusRetiring || vaults[0].RetiredHeight != 11 ||
 		vaults[1].Status != VaultStatusActive || vaults[1].Primary != pubOf(t, testPub2) {
 		t.Fatalf("after rotation: %+v next %d active %d", vaults, next, active)
+	}
+	// Generation 0 keeps the nonces for its in-flight withdrawal, and its
+	// sweeps start after it; new withdrawals wait for the hand-off.
+	if h, held := WithdrawNonceHolder(); !held || h != 0 || GetPendingNonce() != 4 || GetConfirmedNonce() != 3 {
+		t.Fatalf("holder %d %v, nonces %d/%d", h, held, GetConfirmedNonce(), GetPendingNonce())
+	}
+	if c, ok := WithdrawCeiling(0); !ok || c != 4 || SweepNonce(0) != 4 {
+		t.Fatalf("ceiling %d %v, sweep nonce %d", c, ok, SweepNonce(0))
+	}
+	if !withdrawalNoncesHeld() || !holdsInFlightWithdrawals(0) {
+		t.Fatal("new withdrawals not held while generation 0's is in flight")
+	}
+	SetConfirmedNonce(4) // it settles
+	if withdrawalNoncesHeld() || holdsInFlightWithdrawals(0) {
+		t.Fatal("no hand-off once generation 0's withdrawal settled")
+	}
+	if _, held := WithdrawNonceHolder(); held {
+		t.Fatal("holder kept after the hand-off")
 	}
 	// The new address starts at nonce 0; the retiring one sweeps from its own.
 	if GetPendingNonce() != 0 || GetConfirmedNonce() != 0 || SweepNonce(0) != 4 {
@@ -190,19 +206,36 @@ func TestA01_RetiringSnapshotBooksTheCustody(t *testing.T) {
 	}
 }
 
-func TestA01_LegacyQueueBlocksTheFirstRotation(t *testing.T) {
+// ROT-HALT-1: a queue written before the counters existed is counted a bounded
+// walk at a time, never by waiting for it to empty; entries queued or removed
+// meanwhile keep the count right.
+func TestA01_LegacyQueueIsRecountedInSteps(t *testing.T) {
 	lifecycleBridge(t)
 	genesisActive(t)
-	// A queue entry written before the counters existed: no exact marker.
-	sdk.StateSetObject(queueKey(0), `{"seq":0,"from":"hive:a","to":"0x00000000000000000000000000000000000000e2","asset":"eth","amount":1,"debit":1}`)
-	sdk.StateSetObject(constants.WithdrawQueueTailKey, "1")
+	n := int(constants.MaxQueueWalk) + 6
+	sum := big.NewInt(0)
+	for i := 0; i < n; i++ {
+		sdk.StateSetObject(queueKey(uint64(i)), `{"seq":`+strconv.Itoa(i)+`,"from":"hive:a","to":"0x00000000000000000000000000000000000000e2","asset":"eth","amount":1,"debit":`+strconv.Itoa(i+1)+`}`)
+		sum.Add(sum, big.NewInt(int64(i+1)))
+	}
+	sdk.StateSetObject(constants.WithdrawQueueTailKey, strconv.Itoa(n))
 	sdk.StateDeleteObject(constants.QueuedDebitExactKey)
+	if StepQueuedDebitRecount() {
+		t.Fatalf("one step walked all %d entries, more than MaxQueueWalk", n)
+	}
+	Enqueue(QueuedWithdrawal{From: "hive:b", To: "0x00000000000000000000000000000000000000e3", Asset: "eth", Amount: big.NewInt(1), Debit: big.NewInt(1000)})
+	RemoveQueued(0, GetQueued(0))                     // walked: its 1 was counted
+	RemoveQueued(uint64(n-1), GetQueued(uint64(n-1))) // not walked yet: its n never is
+	if !StepQueuedDebitRecount() {
+		t.Fatal("the second step did not finish the walk")
+	}
+	want := new(big.Int).Sub(sum, big.NewInt(int64(1+n)))
+	want.Add(want, big.NewInt(1000))
+	if got := QueuedDebit("eth"); got.Cmp(want) != 0 {
+		t.Fatalf("queued debit %s after the recount, want %s", got, want)
+	}
 	MintNextGeneration(10)
 	sdk.StubSetTssKeyFor("primaryv1", "active,"+testPub2+",ecdsa,1,1")
-	_, _, _, err := ActivatePendingGeneration(11)
-	mustErr(t, err, "drain once")
-	// Once the queue has been empty, the counters are exact.
-	RemoveQueued(0, GetQueued(0))
 	if _, _, _, err := ActivatePendingGeneration(11); err != nil {
 		t.Fatal(err)
 	}

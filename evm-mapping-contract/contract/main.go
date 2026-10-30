@@ -235,6 +235,12 @@ func createKey(_ *string) *string {
 //go:wasmexport activateKey
 func activateKey(_ *string) *string {
 	checkOwner()
+	// A queue left from before the rotation upgrade is counted a bounded walk
+	// per call; the progress must persist, so this returns rather than aborts.
+	if !mapping.StepQueuedDebitRecount() {
+		out := "counting the withdrawal queue left from before the rotation upgrade (a bounded step per call): call activateKey again"
+		return &out
+	}
 	activated, retired, had, err := mapping.ActivatePendingGeneration(mapping.L1Height())
 	if err != nil {
 		ce.CustomAbort(err)

@@ -203,6 +203,12 @@ func TestA01_FullMigration(t *testing.T) {
 	if vaults[0].Status != VaultStatusDraining || SweepNonce(0) != 2 {
 		t.Fatalf("gen 0 status %v sweep nonce %d after the batch", vaults[0].Status, SweepNonce(0))
 	}
+	// ETH of a gen-0 withdrawal refunded from now on went with this sweep.
+	booked := VaultBook(0, "eth")
+	bookSpendRefund(&PendingSpend{VaultAtQueue: crypto.AddressToHex(w.gen0), Asset: "eth"}, wei("5"))
+	if VaultBook(0, "eth").Cmp(booked) != 0 {
+		t.Fatal("refunded ETH booked to gen 0 after its proven ETH sweep")
+	}
 	if out, _ := HandleMigrateVault(1, nil); !strings.Contains(out, "in flight") {
 		t.Fatalf("second batch while one is open: %q", out)
 	}

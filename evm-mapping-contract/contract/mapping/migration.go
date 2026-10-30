@@ -490,6 +490,7 @@ func buildETHSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte,
 		Versions: []SweepVersion{{Value: e.value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: e.feeCap}},
 	}
 	putSweep(r)
+	sdk.StateSetObject(constants.ETHSweptPrefix+strconv.FormatUint(uint64(gen), 10), "1")
 	sdk.TssSignKey(VaultKeyName(gen), ComputeSighash(unsigned))
 	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=eth|v=" + e.value.String() + "|to=" + r.To)
 	return "sweep " + sweepKey(gen, nonce) + " eth " + e.value.String()

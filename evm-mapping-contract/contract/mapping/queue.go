@@ -62,6 +62,7 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 // head: 32 such entries (max_fee 1 wei, queued while no fresh pricing header
 // existed) took every drain's MaxDrainScan budget and froze all withdrawals.
 func DrainWithdrawalQueue(chainId uint64, max int) int {
+	StepQueuedDebitRecount()
 	vault, ok := TssVaultAddress()
 	if !ok {
 		return 0
@@ -71,9 +72,13 @@ func DrainWithdrawalQueue(chainId uint64, max int) int {
 
 // issuableNow is the pricing header to issue a withdrawal with now, or nil
 // when none can be issued (no vault, paused, MaxInFlightWithdrawals in flight,
-// no active TSS key, no fresh pricing header).
+// a superseded generation's in-flight withdrawals still holding the nonces, no
+// active TSS key, no fresh pricing header).
 func issuableNow(vault [20]byte) *blocklist.EthBlockHeader {
 	if vault == ([20]byte{}) || isPaused() || InFlightWithdrawals() >= constants.MaxInFlightWithdrawals {
+		return nil
+	}
+	if withdrawalNoncesHeld() {
 		return nil
 	}
 	if requireTssKey() != nil {
@@ -195,6 +200,12 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 			if l1Value.Sign() <= 0 {
 				return queueRefund, "fee " + feeWei.String() + " not below the amount"
 			}
+		}
+		// Before anything is credited: a wait leaves the entry as it was.
+		if !activeGenCovers(q, queued, constants.NativeAsset, new(big.Int).Add(l1Value, feeWei), nil) {
+			return queueWait, ""
+		}
+		if q.DeductFee {
 			userCost.Set(q.Amount)
 		} else {
 			// Fee on top: the caller authorized FeeCap; return what the
@@ -204,9 +215,6 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 				trackRefund(constants.NativeAsset, unused)
 			}
 			userCost.Add(q.Amount, feeWei)
-		}
-		if !activeGenCovers(q, queued, constants.NativeAsset, new(big.Int).Add(l1Value, feeWei), nil) {
-			return queueWait, ""
 		}
 		unsigned = BuildETHWithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, toAddr, l1Value, gas)
 		ps.Amount = l1Value // the L1 tx value: returns to the vault on revert

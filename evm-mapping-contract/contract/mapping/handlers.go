@@ -686,6 +686,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		s.Active.Add(s.Active, ps.Amount)
 		s.User.Add(s.User, ps.Amount)
 		SetSupply(ps.Asset, s)
+		bookSpendRefund(ps, ps.Amount)
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
 	}
@@ -1452,7 +1453,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	// lifecycles. Each new withdrawal (a higher confirmedNonce) reads a fresh
 	// empty key, so its FIRST fee-bump is never blocked by an unrelated prior
 	// withdrawal's replace clock. No reset bookkeeping is needed.
-	cooldownKey := replaceCooldownKey(confirmedNonce)
+	cooldownKey := replaceCooldownKey(ps, confirmedNonce)
 	if last := sdk.StateGetObject(cooldownKey); last != nil {
 		lastH, _ := strconv.ParseUint(*last, 10, 64)
 		if rwEnv.BlockHeight < lastH+constants.ReplaceWithdrawalCooldown {
@@ -1502,7 +1503,7 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 	}
 
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey(ActiveKeyName(), sighash)
+	sdk.TssSignKey(spendKeyName(ps), sighash)
 
 	// MED-33 (M23-F16): record the block of this successful replace so the
 	// cooldown gate above can rate-limit the next one. round3 C-SM3: written
@@ -1558,6 +1559,7 @@ func refundDroppedWithdrawal(ps *PendingSpend) {
 	sup.Active.Add(sup.Active, refund)
 	sup.User.Add(sup.User, refund)
 	SetSupply(ps.Asset, sup)
+	bookSpendRefund(ps, refund)
 }
 
 func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop) error {
@@ -1582,11 +1584,11 @@ func HandleClearNonce(vaultAddress [20]byte, chainId uint64, proof L1ProofOfDrop
 		confirmedNonce,
 		4_000_000_000,
 		100_000_000_000,
-		vaultAddress,
+		spendAddress(ps, vaultAddress),
 		big.NewInt(0),
 	)
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey(ActiveKeyName(), sighash)
+	sdk.TssSignKey(spendKeyName(ps), sighash)
 
 	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
 	// big.Int refundDroppedWithdrawal cannot overflow, so it subsumes 30710e4's
@@ -1717,9 +1719,9 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, vaultAddress [2
 		return errors.New("L1ProofOfDrop verify failed: " + err.Error())
 	}
 	// TSS-sign self-transfer to roll the L1 vault nonce.
-	unsigned := BuildETHWithdrawalTx(chainId, nonce, 4_000_000_000, 100_000_000_000, vaultAddress, big.NewInt(0))
+	unsigned := BuildETHWithdrawalTx(chainId, nonce, 4_000_000_000, 100_000_000_000, spendAddress(ps, vaultAddress), big.NewInt(0))
 	sighash := ComputeSighash(unsigned)
-	sdk.TssSignKey(ActiveKeyName(), sighash)
+	sdk.TssSignKey(spendKeyName(ps), sighash)
 
 	// Proven-dropped refund: full make-whole (value + prepaid fee / reserve).
 	// big.Int refundDroppedWithdrawal cannot overflow (subsumes 30710e4's int64
@@ -1767,8 +1769,10 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 	if err != nil || snapshottedVault == ([20]byte{}) {
 		return errors.New("legacy PendingSpend entry — clear via admin clearNonce/state procedure")
 	}
-	// The roll must come from the address the withdrawal would spend from.
-	if vaultAddress != snapshottedVault {
+	// The roll must come from the address the withdrawal would spend from: the
+	// active vault, or a superseded generation finishing its own in-flight
+	// withdrawals (ROT-HALT-1).
+	if _, ok := SpendGen(ps); vaultAddress != snapshottedVault && !ok {
 		return errors.New("rollWithdrawal: the TSS key no longer holds the vault this withdrawal was queued from")
 	}
 	if err := requireTssKey(); err != nil {
@@ -1779,7 +1783,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 			"; it can be rolled from L1 block " + strconv.FormatUint(ps.BlockHeight+constants.WithdrawalRollWindow, 10))
 	}
 	env := sdk.GetEnv()
-	cooldownKey := replaceCooldownKey(confirmedNonce)
+	cooldownKey := replaceCooldownKey(ps, confirmedNonce)
 	if last := sdk.StateGetObject(cooldownKey); last != nil {
 		lastH, _ := strconv.ParseUint(*last, 10, 64)
 		if env.BlockHeight < lastH+constants.ReplaceWithdrawalCooldown {
@@ -1796,7 +1800,7 @@ func HandleRollWithdrawal(nonce uint64, vaultAddress [20]byte, chainId uint64) e
 		return ce.NewContractError(ce.ErrArithmetic, "gas fee cap overflow", "rollWithdrawal")
 	}
 	unsigned := BuildETHWithdrawalTx(chainId, confirmedNonce, gasTipCap, gasFeeCap, snapshottedVault, big.NewInt(0))
-	sdk.TssSignKey(ActiveKeyName(), ComputeSighash(unsigned))
+	sdk.TssSignKey(spendKeyName(ps), ComputeSighash(unsigned))
 	sdk.StateSetObject(cooldownKey, strconv.FormatUint(env.BlockHeight, 10))
 	ps.Rolled = true
 	ps.UnsignedTxHex = hex.EncodeToString(unsigned)
@@ -2052,10 +2056,25 @@ const ConfirmSpendSchemaJSON = `{"version":2,"type":"ConfirmSpendRequest","field
 // generation's withdrawal at nonce. A01: each generation's address counts its
 // nonces from 0, so generation N > 0 keys it by generation too; generation 0
 // keeps the original key.
-func replaceCooldownKey(nonce uint64) string {
-	if v, ok := ActiveVault(); ok && v.Generation > 0 {
-		return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(uint64(v.Generation), 10) +
+func replaceCooldownKey(ps *PendingSpend, nonce uint64) string {
+	gen := uint32(0)
+	if g, ok := SpendGen(ps); ok {
+		gen = g.Generation
+	} else if v, ok := ActiveVault(); ok {
+		gen = v.Generation
+	}
+	if gen > 0 {
+		return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(uint64(gen), 10) +
 			constants.DirPathDelimiter + strconv.FormatUint(nonce, 10)
 	}
 	return constants.ReplaceWithdrawalLastKey + strconv.FormatUint(nonce, 10)
+}
+
+// spendAddress is the address ps spends from (its VaultAtQueue), for a 0-value
+// self-transfer at its nonce; fallback when the record has none.
+func spendAddress(ps *PendingSpend, fallback [20]byte) [20]byte {
+	if a, err := crypto.HexToAddress(ps.VaultAtQueue); err == nil && a != ([20]byte{}) {
+		return a
+	}
+	return fallback
 }

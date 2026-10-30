@@ -42,6 +42,53 @@ func HasPendingWithdrawal() bool {
 	return GetPendingNonce() > GetConfirmedNonce()
 }
 
+// WithdrawNonceHolder is the superseded generation still holding the
+// withdrawal nonces for the withdrawals it had in flight at its cut-over
+// (ROT-HALT-1); ok is false once they belong to the active generation.
+func WithdrawNonceHolder() (uint32, bool) {
+	s := sdk.StateGetObject(constants.WithdrawNonceHolderKey)
+	if s == nil {
+		return 0, false
+	}
+	g, err := strconv.ParseUint(*s, 10, 32)
+	return uint32(g), err == nil
+}
+
+// withdrawalNoncesHeld reports whether new withdrawals must wait because a
+// superseded generation's in-flight withdrawals still hold the nonces. Once
+// they have all settled it hands the nonces to the active generation (they
+// restart at 0 for its address) and reports false.
+func withdrawalNoncesHeld() bool {
+	if _, held := WithdrawNonceHolder(); !held {
+		return false
+	}
+	if HasPendingWithdrawal() {
+		return true
+	}
+	sdk.StateDeleteObject(constants.NonceConfirmedKey)
+	sdk.StateDeleteObject(constants.NoncePendingKey)
+	sdk.StateDeleteObject(constants.WithdrawNonceHolderKey)
+	return false
+}
+
+// holdsInFlightWithdrawals reports whether gen still has withdrawals in flight
+// from before its cut-over: it is not empty, whatever its books say.
+func holdsInFlightWithdrawals(gen uint32) bool {
+	h, held := WithdrawNonceHolder()
+	return held && h == gen && HasPendingWithdrawal()
+}
+
+// WithdrawCeiling is the first L1 nonce of superseded generation gen after the
+// withdrawals it issued while active.
+func WithdrawCeiling(gen uint32) (uint64, bool) {
+	s := sdk.StateGetObject(constants.WithdrawCeilingPrefix + strconv.FormatUint(uint64(gen), 10))
+	if s == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(*s, 10, 64)
+	return n, err == nil
+}
+
 // PendingSpend — LOCKED 8-field struct (W1 D-F-3 + W4 Step 3, v19 §AQ + v20 §BE,
 // coordinated with Cluster E). VaultAtQueue is the vault L1 address SNAPSHOT
 // at unmapETH/unmapERC20/unmapFrom queue time, stored as a 0x-prefixed
@@ -364,9 +411,10 @@ func Enqueue(q QueuedWithdrawal) uint64 {
 	if err != nil {
 		sdk.Revert("queued withdrawal marshal failed", "enqueue")
 	}
+	counted := queuedDebitCounts(tail)
 	sdk.StateSetObject(queueKey(tail), string(b))
 	sdk.StateSetObject(constants.WithdrawQueueTailKey, strconv.FormatUint(tail+1, 10))
-	if queuedDebitExact() && q.Debit != nil {
+	if counted && q.Debit != nil {
 		addQueuedDebit(q.Asset, q.Debit)
 	}
 	return tail
@@ -391,13 +439,71 @@ func QueuedDebit(asset string) *big.Int {
 }
 
 // queuedDebitExact reports whether the counters cover every queued entry: they
-// have been kept since the queue was last empty.
+// have been kept since the queue was last empty, or a recount has finished.
 func queuedDebitExact() bool {
 	if QueueLen() == 0 {
 		return true
 	}
 	m := sdk.StateGetObject(constants.QueuedDebitExactKey)
 	return m != nil && *m == "1"
+}
+
+// queuedDebitRecount returns a running recount's cursor and the tail when it
+// started.
+func queuedDebitRecount() (cursor, end uint64, ok bool) {
+	s := sdk.StateGetObject(constants.QueuedDebitRecountKey)
+	if s == nil {
+		return 0, 0, false
+	}
+	parts := splitPipe(*s)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	c, err1 := strconv.ParseUint(parts[0], 10, 64)
+	e, err2 := strconv.ParseUint(parts[1], 10, 64)
+	return c, e, err1 == nil && err2 == nil
+}
+
+// queuedDebitCounts reports whether entry seq's debit is in the counters: all
+// are once exact; during a recount, those the walk has passed and those
+// queued after it started.
+func queuedDebitCounts(seq uint64) bool {
+	if queuedDebitExact() {
+		return true
+	}
+	cursor, end, ok := queuedDebitRecount()
+	return ok && (seq < cursor || seq >= end)
+}
+
+// StepQueuedDebitRecount makes the counters exact for a queue left from before
+// they existed: each call walks at most MaxQueueWalk entries (a bounded cost)
+// and the counters are exact once the walk reaches the tail the recount started
+// at. Entries queued or removed meanwhile keep the counters right (Enqueue,
+// RemoveQueued). It reports whether the counters are exact.
+func StepQueuedDebitRecount() bool {
+	if queuedDebitExact() {
+		return true
+	}
+	cursor, end, ok := queuedDebitRecount()
+	if !ok {
+		for _, a := range vaultAssets() {
+			sdk.StateDeleteObject(queuedDebitKey(a))
+		}
+		cursor, end = QueueBounds()
+	}
+	for n := uint64(0); cursor < end && n < constants.MaxQueueWalk; n++ {
+		if q := GetQueued(cursor); q != nil && q.Debit != nil {
+			addQueuedDebit(q.Asset, q.Debit)
+		}
+		cursor++
+	}
+	if cursor >= end {
+		sdk.StateDeleteObject(constants.QueuedDebitRecountKey)
+		sdk.StateSetObject(constants.QueuedDebitExactKey, "1")
+		return true
+	}
+	sdk.StateSetObject(constants.QueuedDebitRecountKey, strconv.FormatUint(cursor, 10)+"|"+strconv.FormatUint(end, 10))
+	return false
 }
 
 func addQueuedDebit(asset string, delta *big.Int) {
@@ -435,9 +541,9 @@ func GetQueued(seq uint64) *QueuedWithdrawal {
 // RemoveQueued deletes entry seq (q, as the caller read it) and advances the
 // head past removed entries.
 func RemoveQueued(seq uint64, q *QueuedWithdrawal) {
-	exact := queuedDebitExact()
+	counted := queuedDebitCounts(seq)
 	sdk.StateDeleteObject(queueKey(seq))
-	if exact && q != nil && q.Debit != nil {
+	if counted && q != nil && q.Debit != nil {
 		addQueuedDebit(q.Asset, new(big.Int).Neg(q.Debit))
 	}
 	advanceQueueHead()

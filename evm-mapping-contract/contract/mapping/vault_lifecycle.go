@@ -133,7 +133,7 @@ func genFunded(gen uint32) bool {
 			return true
 		}
 	}
-	return hasOpenSweep(gen)
+	return hasOpenSweep(gen) || holdsInFlightWithdrawals(gen)
 }
 
 // AnyFundedSupersededGen is NN#3: no new generation while a superseded one still
@@ -269,26 +269,34 @@ func ActivatePendingGeneration(height uint32) (uint32, uint32, bool, error) {
 
 // retireActiveGeneration hands the vault from generation gen to its successor.
 //
-// F1 (EVM form of BTC's settle-before-activate): no withdrawal may be in flight
-// on gen. After the cut-over gen's key signs nothing but sweeps to the successor
-// (node output scoping), so an in-flight withdrawal could never be replaced,
-// rolled or cancelled with a new signature.
+// The cut-over never waits for gen's in-flight withdrawals (ROT-HALT-1: with
+// withdrawals arriving faster than they settle, a settle-first rule could
+// refuse activation for good). gen keeps the withdrawal nonces until they
+// settle (WithdrawNonceHolder), and its key may still replace or roll them:
+// the node lets a retiring key sign below WithdrawCeiling only the contract's
+// own record of such a withdrawal, or a 0-value roll to itself. New
+// withdrawals wait for the hand-off; they wait for the sweep to reach the new
+// generation anyway.
 //
-// It then books what gen's address holds, per asset: the custody, plus the
-// queued withdrawals' debits (requested, not yet sent, so still there), minus
-// what other superseded generations hold. The new generation starts with
-// nothing; it serves from its own deposits and from the sweep once that lands.
-// The withdrawal nonce restarts at 0 for the new address, and gen's sweeps
-// carry on from its own.
+// It books what gen's address holds, per asset: the custody, plus the queued
+// withdrawals' debits (requested, not yet sent, so still there), minus what
+// other superseded generations hold. In-flight withdrawals left the custody
+// when issued and leave gen's address when they mine; one that is refunded
+// instead is booked back to gen (bookSpendRefund). The new generation starts
+// with nothing; it serves from its own deposits and from the sweep once that
+// lands. gen's sweeps carry on from the nonce after its withdrawals.
 func retireActiveGeneration(vaults VaultRegistry, gen uint32) error {
-	if HasPendingWithdrawal() {
+	if _, held := WithdrawNonceHolder(); held && HasPendingWithdrawal() {
+		// Two cut-overs within one settle time: the older generation's
+		// withdrawals still hold the nonces. Rare (a new key takes a keygen, a
+		// check signature and a reshare); it clears as they settle.
 		return ce.NewContractError(ce.ErrTransaction,
-			"cannot activate: generation "+strconv.FormatUint(uint64(gen), 10)+
-				" has a withdrawal in flight; let it confirm (or clear it) first, its key will only sign sweeps after the cut-over (F1)")
+			"cannot activate: an earlier generation's in-flight withdrawals still hold the withdrawal nonces; retry once they settle")
 	}
-	if !queuedDebitExact() {
+	withdrawalNoncesHeld() // a finished hand-off clears the old holder
+	if !StepQueuedDebitRecount() {
 		return ce.NewContractError(ce.ErrTransaction,
-			"cannot activate: the withdrawal queue holds entries from before the rotation upgrade; let it drain once first")
+			"cannot activate yet: counting the withdrawal queue left from before the rotation upgrade, a bounded step per call; retry")
 	}
 	for _, asset := range vaultAssets() {
 		held := new(big.Int).Set(GetSupply(asset).Active)
@@ -300,13 +308,36 @@ func retireActiveGeneration(vaults VaultRegistry, gen uint32) error {
 		}
 		setVaultBook(gen, asset, held) // aborts on a negative: the books disagree with the custody
 	}
-	setSweepNonce(gen, GetPendingNonce())
+	next := GetPendingNonce()
+	setSweepNonce(gen, next)
+	sdk.StateSetObject(constants.WithdrawCeilingPrefix+strconv.FormatUint(uint64(gen), 10), strconv.FormatUint(next, 10))
 	// Every deposit in the snapshot mined at or before the newest stored
 	// header: an ETH sweep's balance proof must not be older.
 	noteBookedHeight(gen, blocklist.GetLastHeight())
+	if HasPendingWithdrawal() {
+		sdk.StateSetObject(constants.WithdrawNonceHolderKey, strconv.FormatUint(uint64(gen), 10))
+		return nil
+	}
 	sdk.StateDeleteObject(constants.NonceConfirmedKey)
 	sdk.StateDeleteObject(constants.NoncePendingKey)
 	return nil
+}
+
+// bookSpendRefund books amount of a refunded withdrawal back to the superseded
+// generation it was issued from: it never left that address, and the custody
+// it returns to must not be counted as the active generation's. ETH is the
+// exception once the generation's ETH has been swept from a proven balance:
+// the proof was taken after the withdrawal's nonce was spent, so the ETH went
+// with that sweep to the active generation.
+func bookSpendRefund(ps *PendingSpend, amount *big.Int) {
+	g, ok := SpendGen(ps)
+	if !ok || g.Status == VaultStatusActive || amount.Sign() <= 0 {
+		return
+	}
+	if ps.Asset == constants.NativeAsset && sdk.StateGetObject(constants.ETHSweptPrefix+strconv.FormatUint(uint64(g.Generation), 10)) != nil {
+		return
+	}
+	addVaultBook(g.Generation, ps.Asset, amount)
 }
 
 func sweepNonceKey(gen uint32) string {

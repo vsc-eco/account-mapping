@@ -311,11 +311,28 @@ const TokenSymbolsKey = "tsyms"
 // QueuedDebitPrefix is the sum of the queued (not yet issued) withdrawals'
 // debits per asset: wqd-{asset}. The funds are still at the vault, so a
 // rotation books them to the retiring generation. QueuedDebitExactKey is "1"
-// once the counters have been exact since an empty queue (a queue left from
-// before the counters existed is not counted, and a rotation waits for it).
+// once the counters cover every queued entry. A queue left from before the
+// counters existed is counted a bounded walk at a time (QueuedDebitRecountKey
+// holds "{cursor}|{tail at start}" meanwhile), never by waiting for it to
+// empty.
 const (
-	QueuedDebitPrefix   = "wqd" + DirPathDelimiter
-	QueuedDebitExactKey = "wqdx"
+	QueuedDebitPrefix     = "wqd" + DirPathDelimiter
+	QueuedDebitExactKey   = "wqdx"
+	QueuedDebitRecountKey = "wqdr"
+)
+
+// A01 cut-over without a settle wait (ROT-HALT-1). The retiring generation
+// keeps the withdrawal nonces ("n"/"np") until the withdrawals it had in flight
+// settle; WithdrawNonceHolderKey names it meanwhile, then the nonces restart
+// at 0 for the active generation. WithdrawCeilingPrefix (wnc-{gen}) is the
+// first nonce after them: its sweeps start there, and its key signs nothing
+// else below it. ETHSweptPrefix (vse-{gen}) marks a generation whose ETH has
+// been swept from a proven balance: ETH of one of its withdrawals refunded
+// later went with that sweep.
+const (
+	WithdrawNonceHolderKey = "wnh"
+	WithdrawCeilingPrefix  = "wnc" + DirPathDelimiter
+	ETHSweptPrefix         = "vse" + DirPathDelimiter
 )
 
 // Migration sweeps (A01): ms-{gen}-{nonce} → JSON sweep record; MigrationSweepsKey

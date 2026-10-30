@@ -282,6 +282,32 @@ func ActiveKeyName() string {
 	return constants.VaultKeyBaseName
 }
 
+// SpendGen is the fund-holding generation a pending spend was issued from (the
+// address in its VaultAtQueue). Its key, not necessarily the active one,
+// signs the spend's replacement or roll (ROT-HALT-1: a generation finishes its
+// own in-flight withdrawals after its cut-over).
+func SpendGen(ps *PendingSpend) (fundHoldingGen, bool) {
+	addr, err := crypto.HexToAddress(ps.VaultAtQueue)
+	if err != nil || addr == ([20]byte{}) {
+		return fundHoldingGen{}, false
+	}
+	for _, g := range FundHoldingGens() {
+		if g.Address == addr {
+			return g, true
+		}
+	}
+	return fundHoldingGen{}, false
+}
+
+// spendKeyName is the TSS key that signs for ps: its generation's, else (a
+// pre-rotation bridge) the active key.
+func spendKeyName(ps *PendingSpend) string {
+	if g, ok := SpendGen(ps); ok {
+		return VaultKeyName(g.Generation)
+	}
+	return ActiveKeyName()
+}
+
 // fundHoldingGen is a fund-holding generation with its L1 address.
 type fundHoldingGen struct {
 	Vault
