@@ -74,7 +74,7 @@ const (
 //   Operator-tactical (28.8K, 24h):  replaceWithdrawal, clearNonce
 //   (setVault and registerPublicKey were removed by A18: the vault is the TSS
 //   primary key's address.)
-//   Operational (7.2K, 6h):          registerToken, registerRouter,
+//   Operational (7.2K, 6h):          registerToken, registerRouter, setETHGasLimit,
 //                                     registerRelayer, deregisterRelayer,
 //                                     clearTestnetState (Cluster E coord)
 //   Emergency (0):                   pause, unpause, renewKey (D7)
@@ -89,7 +89,7 @@ func TimelockFor(action string) (uint64, error) {
 		return TimelockLong, nil
 	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
-	case "registerToken", "registerRouter",
+	case "registerToken", "registerRouter", "setETHGasLimit", "setProofFee", "setTokenGasRate",
 		"registerRelayer", "deregisterRelayer", "clearTestnetState":
 		return TimelockOperational, nil
 	// D7: renewKey only extends the vault key's life and moves nothing. The

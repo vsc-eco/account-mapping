@@ -45,6 +45,10 @@ func TestD7_RenewKeyIsImmediateAndWorksWhilePaused(t *testing.T) {
 		sdk.ResetStubState()
 		sdk.SetTestEnvKey("contract.owner", owner)
 		sdk.SetTestCaller(owner)
+		// A01: renewKey renews every fund-holding generation's renewable key; a
+		// running bridge's checked "primary" key is generation 0.
+		sdk.StubSetTssKey("active,0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,ecdsa")
+		sdk.StateSetObject(constants.VaultCheckedKey, "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
 		if paused {
 			sdk.StateSetObject(constants.PausedKey, "1")
 		}

@@ -149,9 +149,17 @@ func TestReview6Followup_RouteDepositETHHonorsInstructions(t *testing.T) {
 	t.Run("eth_dispatches_swap", func(t *testing.T) {
 		// swap_to + asset_out now reaches the DEX dispatch on the ETH path and
 		// returns "" (routeDeposit credited the funds into the swap).
-		dest := routeDeposit(sender, []string{"swap_to=hive:bob", "asset_out=hbd"}, "eth", big.NewInt(100), chainId)
+		dest := routeDeposit(sender, []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=1"}, "eth", big.NewInt(100), chainId)
 		if dest != "" {
 			t.Fatalf("ETH swap must dispatch and return \"\"; got %q", dest)
+		}
+	})
+
+	t.Run("eth_swap_without_min_credits_the_depositor", func(t *testing.T) {
+		// RP-8: without the depositor's min_amount_out no swap runs.
+		dest := routeDeposit(sender, []string{"swap_to=hive:bob", "asset_out=hbd"}, "eth", big.NewInt(100), chainId)
+		if dest != expectedDID {
+			t.Fatalf("a swap without min_amount_out must credit the depositor; got %q, want %q", dest, expectedDID)
 		}
 	})
 

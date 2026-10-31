@@ -79,7 +79,7 @@ func (w *rollWorld) roll() error { return HandleRollWithdrawal(0, w.vault, 1) }
 // mine signs unsigned (hex) with the vault key and plants it at TxIndex 1 of
 // L1 block n with a receipt of the given status; returns the confirmSpend
 // request for it.
-func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64) *ConfirmSpendRequest {
+func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64, logs ...[]byte) *ConfirmSpendRequest {
 	w.t.Helper()
 	unsigned, _ := hex.DecodeString(unsignedHex)
 	priv := secp256k1.PrivKeyFromBytes(mustHex(w.t, rollVaultPriv))
@@ -89,7 +89,7 @@ func (w *rollWorld) mine(n uint64, unsignedHex string, status uint64) *ConfirmSp
 		w.t.Fatal(err)
 	}
 	txRoot, txNodes := buildSingleLeafMPT(signed)
-	receipt := rlp.EncodeList(rlp.EncodeUint64(status), rlp.EncodeUint64(21000), rlp.EncodeBytes(make([]byte, 256)), rlp.EncodeList())
+	receipt := rlp.EncodeList(rlp.EncodeUint64(status), rlp.EncodeUint64(21000), rlp.EncodeBytes(make([]byte, 256)), rlp.EncodeList(logs...))
 	rcRoot, rcNodes := buildSingleLeafMPT(append([]byte{0x02}, receipt...))
 	w.header(n, txRoot, rcRoot)
 	w.last = n
@@ -203,7 +203,7 @@ func TestD3_ERC20WithdrawalMinedAfterARollIsNotRefunded(t *testing.T) {
 	if !GetPendingSpend(0).Rolled {
 		t.Fatal("the withdrawal was not marked rolled")
 	}
-	req := w.mine(w.last+1, orig, 1)
+	req := w.mine(w.last+1, orig, 1, rp7Log(token, word32(amount), TransferEventSig[:], addrTopic(w.vault), addrTopic(to)))
 	req.IntentAsset, req.IntentAmount = "usdc", amount.String()
 	if err := HandleConfirmSpend(req, 1); err != nil {
 		t.Fatalf("confirmSpend for the mined ERC-20 withdrawal: %v", err)
@@ -320,5 +320,99 @@ func TestE22_ExpireWindowIsCountedInL1Blocks(t *testing.T) {
 	err = HandleExpireWithdrawal(0, L1ProofOfDrop{Type: L1ProofTypeRevertedReceipt}, 1)
 	if err == nil || strings.Contains(err.Error(), "window not elapsed") {
 		t.Fatalf("a stranger past the L1 window: %v, want the gate open and the proof checked", err)
+	}
+}
+
+// dropProof is the reverted-receipt proof of drop for the confirmSpend request
+// req (its tx mined and reverted).
+func dropProof(req *ConfirmSpendRequest, nonce uint64) L1ProofOfDrop {
+	return L1ProofOfDrop{Type: L1ProofTypeRevertedReceipt, BlockHeight: req.BlockHeight, TxIndex: req.TxIndex, TxNonce: nonce,
+		ReceiptProof: req.ReceiptProof, TxProof: req.TxProof}
+}
+
+// A24: clearing or cancelling a withdrawal whose tx is proven reverted signs
+// nothing (its nonce is spent on L1, a self-transfer there could never mine);
+// a replacement or a roll with the signing key not active is refused before
+// anything is stored (the host would drop the sign request and the stored tx
+// would stand unsigned).
+func TestA24_ResignsNeedAnActiveKeyAndProvenDropsSignNothing(t *testing.T) {
+	defer sdk.ResetStubState()
+	w := newRollWorld(t)
+	w.caller("hive:alice")
+	before := len(sdk.TestSignRequests())
+	proof := dropProof(w.mine(101, GetPendingSpend(0).UnsignedTxHex, 0), 0)
+	if err := HandleCancelMyWithdrawal(0, proof, 1); err != nil {
+		t.Fatalf("cancelMyWithdrawal with a proven revert: %v", err)
+	}
+	if n := len(sdk.TestSignRequests()) - before; n != 0 || GetBalance("hive:alice", "eth").Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("%d sign requests, balance %s: want none and the value refunded", n, GetBalance("hive:alice", "eth"))
+	}
+
+	w = newRollWorld(t)
+	sdk.StubSetTssKey("deprecated,02aa,ecdsa")
+	stored := GetPendingSpend(0).UnsignedTxHex
+	if err := HandleReplaceWithdrawal([20]byte{}, 1); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("replace with the key deprecated: %v", err)
+	}
+	if GetPendingSpend(0).UnsignedTxHex != stored || sdk.StateGetObject(replaceCooldownKey(GetPendingSpend(0), 0)) != nil {
+		t.Fatal("a refused replace stored a tx or started the cooldown")
+	}
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("roll with the key deprecated: %v", err)
+	}
+}
+
+// A14: a replacement or a roll may burn more L1 gas than the withdrawal
+// prepaid; the extra comes from the gas reserve (and the custody) when it is
+// signed, never more than once per price, and a roll is not refused when the
+// reserve is short (the debt is logged).
+func TestA14_ResignGasIsBooked(t *testing.T) {
+	defer sdk.ResetStubState()
+	w := newRollWorld(t)
+	sdk.StateSetObject(constants.GasReserveKey, "1000000000000000") // 0.001 ETH
+	SetSupply("eth", Supply{Active: wei("1000000000000000"), User: new(big.Int), Fee: new(big.Int)})
+	ps := GetPendingSpend(0)
+	ps.GasCost = big.NewInt(84_000_000_000_000) // 21,000 gas at 4 gwei, prepaid
+	StorePendingSpend(*ps)
+	if err := HandleReplaceWithdrawal([20]byte{}, 1); err != nil {
+		t.Fatal(err)
+	}
+	// 3x the 1 gwei base fee + 4 gwei tip = 7 gwei: 147e12 max, 63e12 more.
+	if got := getGasReserve(); got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("reserve %s after the replacement, want 937000000000000", got)
+	}
+	if got := GetSupply("eth").Active; got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("custody %s, want the replacement gas out of it", got)
+	}
+	if got := GetPendingSpend(0).GasCost; got.Cmp(big.NewInt(147_000_000_000_000)) != 0 {
+		t.Fatalf("prepaid %s, want 147e12", got)
+	}
+	// The roll at the same price can burn no more: nothing more is booked.
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	w.l2 += constants.ReplaceWithdrawalCooldown
+	w.caller("hive:carol")
+	if err := w.roll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := getGasReserve(); got.Cmp(wei("937000000000000")) != 0 {
+		t.Fatalf("reserve %s after a roll at the same price", got)
+	}
+
+	// A short reserve: the roll goes through, the reserve is emptied, the debt
+	// is logged.
+	w = newRollWorld(t)
+	sdk.StateSetObject(constants.GasReserveKey, "1000")
+	SetSupply("eth", Supply{Active: wei("1000"), User: new(big.Int), Fee: new(big.Int)})
+	w.last = 100 + constants.WithdrawalRollWindow
+	w.header(w.last, [32]byte{}, [32]byte{})
+	if err := w.roll(); err != nil {
+		t.Fatalf("roll with a short reserve: %v", err)
+	}
+	logs := sdk.TestLogs()
+	if getGasReserve().Sign() != 0 || len(logs) == 0 || !strings.Contains(strings.Join(logs, "\n"), "gasdebt|n=0|v=146999999999000") {
+		t.Fatalf("reserve %s, logs %v: want it emptied and the rest logged", getGasReserve(), logs)
 	}
 }

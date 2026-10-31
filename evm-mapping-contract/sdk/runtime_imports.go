@@ -87,3 +87,7 @@ func abort(msg, file *string, line, column *int32)
 
 //go:wasmimport env revert
 func revert(msg, symbol *string)
+
+// OnTestReset is the test harness hook (sdk_stub.go); in wasm every call
+// starts a fresh instance, so there is nothing to reset.
+func OnTestReset(func()) {}

@@ -1,0 +1,15 @@
+# MagiDeposit: the bytecode is part of the bridge's trust (account-mapping
+# derives the contract's CREATE2 address from it), so every setting that shapes
+# it is pinned here: compiler, EVM version, optimizer, and no CBOR metadata
+# (the bytecode does not change with comments or paths).
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+solc_version = "0.8.33"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false
+offline = true

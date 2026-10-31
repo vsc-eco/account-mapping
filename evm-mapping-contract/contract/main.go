@@ -11,6 +11,7 @@ import (
 	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/contract/mapping"
 	"evm-mapping-contract/sdk"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -142,6 +143,11 @@ func initContract(input *string) *string {
 	if admin.FastTimelockBuild && !params.IsTestnet {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "this build has devnet timelocks (devnet_fasttimelock): initContract requires is_testnet"))
 	}
+	// A07: is_testnet unlocks clearTestnetState (wipes nonces, queue and observed
+	// deposits). A bridge on Ethereum mainnet must never carry it.
+	if params.IsTestnet && params.ChainId == 1 {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "is_testnet cannot be set on chain_id 1 (Ethereum mainnet)"))
+	}
 	sdk.StateSetObject(constants.ChainIdKey, strconv.FormatUint(params.ChainId, 10))
 	// review6 H2: OracleAccountKey is no longer written at init — the
 	// oracle-fed addBlocks path was removed; headers come from the ZK
@@ -159,9 +165,229 @@ func initContract(input *string) *string {
 	return nil
 }
 
-// createPrimaryKey requests the bridge's TSS key, whose address is the vault
-// (A18).
-func createPrimaryKey() { sdk.TssCreateKey("primary", "ecdsa", 365) }
+// createPrimaryKey mints the next vault generation and requests its TSS key,
+// whose address becomes the vault once the generation activates (A18, A01). On
+// a fresh bridge that is generation 0, the "primary" key.
+func createPrimaryKey() string {
+	gen, name, err := mapping.MintNextGeneration(mapping.L1Height())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	sdk.TssCreateKey(name, "ecdsa", 365)
+	return "minted generation " + strconv.FormatUint(uint64(gen), 10) + ", key " + name + " (awaiting keygen)"
+}
+
+// renewVaultKeys renews every fund-holding generation's key that can be
+// renewed, so a retiring generation's key cannot expire while it still holds
+// funds (BTC D-2). A key that cannot be renewed is reported, not fatal.
+func renewVaultKeys() string {
+	names, skipped, err := mapping.RenewableVaultKeyNames()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	for _, n := range names {
+		sdk.TssRenewKey(n, 365)
+	}
+	out := "renewed keys: " + strings.Join(names, ",")
+	if len(skipped) > 0 {
+		sdk.Log("warn|renew-skipped|" + strings.Join(skipped, " "))
+		out += "; skipped (unrenewable, fund-holding): " + strings.Join(skipped, " ")
+	}
+	return out
+}
+
+// checkOperator admits the owner or the appointed vault operator: the
+// operational rotation ops an off-chain driver (the bot) calls. Mirrors the BTC
+// contract.
+func checkOperator() {
+	caller := sdk.GetEnv().Caller.String()
+	if owner := sdk.GetEnvKey("contract.owner"); owner != nil && caller == *owner {
+		return
+	}
+	if op := sdk.StateGetObject(constants.VaultOperatorKey); op != nil && *op != "" && caller == *op {
+		return
+	}
+	ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "action must be performed by the contract owner or the vault operator"))
+}
+
+// A01 rotation ceremony, owner-only and direct like the BTC contract's: the
+// owner can trigger a rotation but not choose its key (activation needs the
+// TSS ceremony's key, its verified check signature and a reshare), so a
+// timelock would add delay and no safety. Not pause-gated: a rotation is the
+// answer to a suspected key compromise.
+
+//go:wasmexport createKey
+func createKey(_ *string) *string {
+	checkOwner()
+	// NN#3: no new generation while a superseded one still holds funds.
+	funded, err := mapping.AnyFundedSupersededGen()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	if funded {
+		ce.CustomAbort(ce.NewContractError(ce.ErrTransaction,
+			"cannot create a new key while a superseded generation still holds funds; drain it (migrateVault) first (NN#3)"))
+	}
+	out := createPrimaryKey()
+	return &out
+}
+
+//go:wasmexport activateKey
+func activateKey(_ *string) *string {
+	checkOwner()
+	// A queue left from before the rotation upgrade is counted a bounded walk
+	// per call; the progress must persist, so this returns rather than aborts.
+	if !mapping.StepQueuedDebitRecount() {
+		out := "counting the withdrawal queue left from before the rotation upgrade (a bounded step per call): call activateKey again"
+		return &out
+	}
+	activated, retired, had, err := mapping.ActivatePendingGeneration(mapping.L1Height())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	out := "activated generation " + strconv.FormatUint(uint64(activated), 10)
+	if had {
+		out += "; generation " + strconv.FormatUint(uint64(retired), 10) + " now retiring"
+	}
+	sdk.Log("vaultactivate|g=" + strconv.FormatUint(uint64(activated), 10))
+	return &out
+}
+
+//go:wasmexport discardPendingKey
+func discardPendingKey(_ *string) *string {
+	checkOwner()
+	gen, err := mapping.DiscardPendingGeneration()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	out := "discarded pending generation " + strconv.FormatUint(uint64(gen), 10)
+	return &out
+}
+
+//go:wasmexport renewKey
+func renewKey(_ *string) *string {
+	checkOwner()
+	out := renewVaultKeys()
+	return &out
+}
+
+// setVaultOperator appoints (or, with an empty input, removes) the account that
+// may call the operational rotation ops besides the owner.
+//
+//go:wasmexport setVaultOperator
+func setVaultOperator(input *string) *string {
+	checkOwner()
+	op := ""
+	if input != nil {
+		op = strings.TrimSpace(*input)
+	}
+	if op == "" {
+		sdk.StateDeleteObject(constants.VaultOperatorKey)
+		return nil
+	}
+	if sdk.VerifyAddress(op) == string(sdk.AddressDomainUnknown) {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVaultOperator: invalid account \""+op+"\""))
+	}
+	sdk.StateSetObject(constants.VaultOperatorKey, op)
+	return nil
+}
+
+//go:wasmexport vaultInfo
+func vaultInfo(_ *string) *string {
+	out := mapping.VaultInfoJSON()
+	return &out
+}
+
+// A01 operational ops: the owner or the vault operator (the bot) drives them.
+// They are pause-gated, as the BTC contract's: each authorizes a new signature
+// or retires state. Settlement (confirmSweep) is not.
+
+type migrateVaultParams struct {
+	EthProof *mapping.AccountProof `json:"eth_proof"`
+}
+
+//go:wasmexport migrateVault
+func migrateVault(input *string) *string {
+	checkOperator()
+	assertNotPaused()
+	var p migrateVaultParams
+	if input != nil && *input != "" {
+		unmarshalParams(input, &p)
+	}
+	out, err := mapping.HandleMigrateVault(chainId(), p.EthProof)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport confirmSweep
+func confirmSweep(input *string) *string {
+	var req mapping.ConfirmSweepRequest
+	unmarshalParams(input, &req)
+	if err := mapping.HandleConfirmSweep(&req, chainId()); err != nil {
+		ce.CustomAbort(ce.WrapContractError(ce.ErrInput, err))
+	}
+	return nil
+}
+
+type sweepIdParams struct {
+	Gen   uint32 `json:"gen"`
+	Nonce uint64 `json:"nonce"`
+}
+
+//go:wasmexport redriveSweep
+func redriveSweep(input *string) *string {
+	checkOperator()
+	assertNotPaused()
+	var p sweepIdParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleRedriveSweep(p.Gen, p.Nonce, chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport retireVault
+func retireVault(_ *string) *string {
+	checkOperator()
+	assertNotPaused()
+	out, err := mapping.ReconcileRetiringVaults(chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport writeOffDust
+func writeOffDust(_ *string) *string {
+	checkOperator()
+	assertNotPaused()
+	out, err := mapping.HandleWriteOffDust()
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+type writeOffTokenParams struct {
+	Gen    uint32 `json:"gen"`
+	Symbol string `json:"symbol"`
+}
+
+//go:wasmexport writeOffToken
+func writeOffToken(input *string) *string {
+	checkOwner()
+	assertNotPaused()
+	var p writeOffTokenParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleWriteOffToken(p.Gen, p.Symbol)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
 
 // -----------------------------------------------------------------------------
 // User-facing wasmexports (NOT admin — no propose/execute wrapping)
@@ -188,17 +414,56 @@ func mapDeposit(input *string) *string {
 func unmapETH(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if _, err := mapping.HandleUnmapETH(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapETH(&params, vault(), chainId())
+	if err != nil {
 		ce.CustomAbort(err)
 	}
-	return nil
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if _, err := mapping.HandleUnmapERC20(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapERC20(&params, vault(), chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
+}
+
+// RP-11: move queued withdrawals into flight now. Permissionless: the bot calls
+// it whenever the queue is non-empty and a slot is free (after a confirm, after
+// a proof brings a fresh pricing header); anyone may. Only this call issues
+// queued withdrawals. Never fails: when nothing can be issued it is a no-op.
+//
+//go:wasmexport drainWithdrawalQueue
+func drainWithdrawalQueue(input *string) *string {
+	// max: how many to issue in this call (default 1, at most
+	// MaxInFlightWithdrawals). Each issue costs ~10-12k RC; set rc_limit to match.
+	var p struct {
+		Max int `json:"max"`
+	}
+	if input != nil && *input != "" {
+		unmarshalParams(input, &p)
+	}
+	if p.Max <= 0 {
+		p.Max = 1
+	}
+	if p.Max > int(constants.MaxInFlightWithdrawals) {
+		p.Max = int(constants.MaxInFlightWithdrawals)
+	}
+	out := strconv.Itoa(mapping.DrainWithdrawalQueue(chainId(), p.Max))
+	return &out // how many were issued
+}
+
+// RP-11: the owner of a queued (not yet issued) withdrawal takes it back.
+//
+//go:wasmexport cancelQueuedWithdrawal
+func cancelQueuedWithdrawal(input *string) *string {
+	var p mapping.CancelQueuedParams
+	unmarshalParams(input, &p)
+	if err := mapping.HandleCancelQueuedWithdrawal(p.Seq); err != nil {
 		ce.CustomAbort(err)
 	}
 	return nil
@@ -250,10 +515,11 @@ func approve(input *string) *string {
 func unmapFrom(input *string) *string {
 	var params mapping.TransferParams
 	unmarshalParams(input, &params)
-	if err := mapping.HandleUnmapFrom(&params, vault(), chainId()); err != nil {
+	status, err := mapping.HandleUnmapFromStatus(&params, vault(), chainId())
+	if err != nil {
 		ce.CustomAbort(err)
 	}
-	return nil
+	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
 //go:wasmexport increaseAllowance
@@ -274,6 +540,19 @@ func decreaseAllowance(input *string) *string {
 		ce.CustomAbort(err)
 	}
 	return nil
+}
+
+// depositAddress returns the vault's MagiDeposit address (RP-7, EIP-55), where
+// a deposit for an explicit Magi recipient is made; "" while there is no vault.
+//
+//go:wasmexport depositAddress
+func depositAddress(_ *string) *string {
+	v, ok := mapping.TssVaultAddress()
+	out := ""
+	if ok {
+		out = crypto.ChecksumHex(mapping.DepositContractAddress(v))
+	}
+	return &out
 }
 
 //go:wasmexport getInfo
@@ -405,7 +684,7 @@ func cancelMyWithdrawal(input *string) *string {
 	if err := json.Unmarshal([]byte(*input), &params); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "cancelMyWithdrawal: bad payload"))
 	}
-	if err := mapping.HandleCancelMyWithdrawal(params.Nonce, params.Proof, vault(), chainId()); err != nil {
+	if err := mapping.HandleCancelMyWithdrawal(params.Nonce, params.Proof, chainId()); err != nil {
 		ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 	}
 	return nil
@@ -488,23 +767,29 @@ func dispatchAdmin(action string, payload []byte) {
 		// old one. Any in-flight withdrawal (its confirmSpend proof binds to a
 		// height anchored under the OLD verifier) would become unconfirmable.
 		// Refuse the swap while a withdrawal is pending so the operator must
-		// first drain/expire the queue (HasPendingWithdrawal is the same
-		// single-outstanding invariant the unmap handlers gate on).
-		if mapping.HasPendingWithdrawal() {
+		// first drain/expire the queue. RP-11: queued withdrawals count too,
+		// they will be issued against the verifier's headers.
+		if mapping.HasQueuedOrPendingWithdrawal() {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setVerifierContract: withdrawal pending — drain/expire before swapping verifier"))
 		}
 		sdk.StateSetObject(constants.VerifierContractIdKey, p.ContractId)
 
 	case "createKey":
-		assertNotPaused()
+		// Kept for the timelocked path; the direct createKey export is the same
+		// mint, behind the same NN#3 gate.
+		if funded, err := mapping.AnyFundedSupersededGen(); err != nil || funded {
+			ce.CustomAbort(ce.NewContractError(ce.ErrTransaction,
+				"cannot create a new key while a superseded generation still holds funds (NN#3)"))
+		}
 		createPrimaryKey()
 
 	case "renewKey":
 		// CRIT #17 flag 1 / W4 Cluster F D-F-1: TssRenewKey extends
 		// ExpiryEpoch (NOT TssCreateKey, which would be a no-op).
 		// D7: allowed while paused: a pause that outlasts the key's expiry
-		// window must not retire the key that holds every deposit.
-		sdk.TssRenewKey("primary", 365)
+		// window must not retire the key that holds every deposit. A01: every
+		// fund-holding generation's key.
+		renewVaultKeys()
 
 	// Operator-tactical (28.8K blocks, 24h)
 	// registerPublicKey was removed (A18): it stored a public key nothing read;
@@ -522,7 +807,7 @@ func dispatchAdmin(action string, payload []byte) {
 		if err := json.Unmarshal(payload, &p); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "clearNonce: bad payload"))
 		}
-		if err := mapping.HandleClearNonce(vault(), chainId(), p.Proof); err != nil {
+		if err := mapping.HandleClearNonce(chainId(), p.Proof); err != nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 		}
 
@@ -566,7 +851,90 @@ func dispatchAdmin(action string, payload []byte) {
 		if p.MinWithdrawal < 0 || p.MinWithdrawal > constants.MaxTokenMinWithdrawal {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal out of range"))
 		}
-		mapping.RegisterToken(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal)
+		// USDC-1 B: the revert fee is kept out of a reverted withdrawal's refund,
+		// so it must not exceed the smallest withdrawal (the refund stays >= 0).
+		effMin := p.MinWithdrawal
+		if effMin <= 0 {
+			effMin = constants.MinUSDCWithdrawal
+		}
+		if p.RevertFee < 0 || p.RevertFee > effMin {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: revert_fee must be between 0 and min_withdrawal"))
+		}
+		// USDC-GAS-1: 0 = ERC20TransferGas, else within the token gas bounds.
+		if p.GasLimit != 0 && (p.GasLimit < constants.MinTokenGasLimit || p.GasLimit > constants.MaxTokenGasLimit) {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: gas_limit out of range"))
+		}
+		// The token's proving fee stays at most half its minimum deposit, as
+		// setProofFee requires: otherwise raising min_withdrawal, setting a
+		// large fee and lowering it again would let the fee take whole deposits.
+		newFloor := big.NewInt((&mapping.TokenInfo{MinWithdrawal: effMin}).MinDeposit())
+		if mapping.ProofFee(p.Symbol).Cmp(mapping.MaxProofFee(newFloor)) > 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal would put the proving fee above half the minimum deposit; lower the fee first"))
+		}
+		if err := mapping.RegisterTokenFull(chainId(), addr, p.Symbol, p.Decimals, p.MinWithdrawal, p.RevertFee, p.GasLimit); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: "+err.Error()))
+		}
+
+	case "setETHGasLimit":
+		// GLAM-1: the default L1 gas limit of an ETH withdrawal (an unmap may
+		// set its own). Raise it when the chain prices account creation higher
+		// (Glamsterdam, EIP-8037); a pending withdrawal keeps the limit it was
+		// signed with.
+		var p struct {
+			GasLimit uint64 `json:"gas_limit"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setETHGasLimit: bad payload"))
+		}
+		if p.GasLimit < constants.ETHTransferGas || p.GasLimit > constants.MaxETHGasLimit {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setETHGasLimit: gas_limit out of range"))
+		}
+		mapping.SetETHGasLimit(p.GasLimit)
+
+	case "setProofFee":
+		// The proving fee of one asset ("eth" or a registered token's symbol),
+		// in its smallest unit; 0 removes it. At most half the asset's smallest
+		// creditable deposit, so a compromised owner key cannot take deposits
+		// through it.
+		var p struct {
+			Asset  string `json:"asset"`
+			Amount string `json:"amount"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: bad payload"))
+		}
+		fee, ok := new(big.Int).SetString(p.Amount, 10)
+		if !ok || fee.Sign() < 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: amount must be a non-negative integer"))
+		}
+		floor := mapping.ProofFeeFloor(p.Asset)
+		if floor == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: unknown asset "+p.Asset))
+		}
+		if fee.Cmp(mapping.MaxProofFee(floor)) > 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setProofFee: amount above half the asset's minimum deposit"))
+		}
+		mapping.SetProofFee(p.Asset, fee)
+
+	case "setTokenGasRate":
+		// A11: the price of 1 ETH in a registered token's smallest units, so
+		// an ERC-20 withdrawal pays its L1 gas in the token; 0 removes it. The
+		// fee it sets is at most half the token's minimum withdrawal.
+		var p struct {
+			Symbol string `json:"symbol"`
+			Rate   string `json:"rate"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: bad payload"))
+		}
+		rate, ok := new(big.Int).SetString(p.Rate, 10)
+		if !ok || rate.Sign() < 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: rate must be a non-negative integer"))
+		}
+		if p.Symbol == "" || p.Symbol == "eth" || mapping.ProofFeeFloor(p.Symbol) == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenGasRate: not a registered token: "+p.Symbol))
+		}
+		mapping.SetTokenGasRate(p.Symbol, rate)
 
 	case "registerRouter":
 		assertNotPaused()

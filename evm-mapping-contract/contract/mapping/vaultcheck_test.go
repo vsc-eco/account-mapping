@@ -76,10 +76,15 @@ func TestE23_VaultGoesLiveOnlyOnTheKeysCheckSignature(t *testing.T) {
 	}
 
 	// v as 0/1 or as 27/28.
-	for _, v := range []string{good, good[:128] + hex.EncodeToString([]byte{27 + sig[64]})} {
+	for i, v := range []string{good, good[:128] + hex.EncodeToString([]byte{27 + sig[64]})} {
 		sdk.StateDeleteObject(constants.VaultCheckedKey)
 		if msg := callErr(func() error { return HandleAttestVault(v, 11155111) }); msg != "" {
 			t.Fatalf("attestVault(v=%s): %s", v[128:], msg)
+		}
+		// A01: attestVault itself puts the checked key in the registry and
+		// caches its address, so the first deposit pays for neither.
+		if c := sdk.StateGetObject(constants.VaultAddrCachePrefix + "0"); i == 0 && (c == nil || !strings.HasSuffix(strings.ToLower(*c), strings.ToLower(tssAddrG))) {
+			t.Fatalf("address cache right after attest: %v", c)
 		}
 		if got, _ := vaultHex(t); !strings.EqualFold(got, tssAddrG) {
 			t.Fatalf("vault after attest (v=%s) = %s, want %s", v[128:], got, tssAddrG)
@@ -88,6 +93,7 @@ func TestE23_VaultGoesLiveOnlyOnTheKeysCheckSignature(t *testing.T) {
 	if logs := sdk.TestLogs(); len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "vault|a=") {
 		t.Fatalf("no vault log: %v", logs)
 	}
+
 	// Verified: a second request is refused, a second attest is a no-op.
 	if msg := callErr(func() error { return HandleRequestVaultCheck(11155111) }); !strings.Contains(msg, "already verified") {
 		t.Fatalf("request after verification = %q", msg)

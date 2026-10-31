@@ -1,5 +1,10 @@
 package mapping
 
+import (
+	"evm-mapping-contract/contract/constants"
+	"math/big"
+)
+
 type MapParams struct {
 	TxData       VerificationRequest `json:"tx_data"`
 	Instructions []string            `json:"instructions"`
@@ -12,7 +17,11 @@ type VerificationRequest struct {
 	MerkleProofHex string `json:"merkle_proof_hex"`
 	LogIndex       uint64 `json:"log_index"`
 	TokenAddress   string `json:"token_address"`
-	DepositType    string `json:"deposit_type"` // "eth" or "erc20"
+	DepositType    string `json:"deposit_type"` // "eth", "erc20" or "contract" (RP-7)
+	// deposit_type "contract" (RP-7), and "erc20" in place of raw_hex +
+	// merkle_proof_hex (ERC20-PAYLOAD-1): base64 of the concatenated
+	// receipt-trie MPT nodes; the leaf is the receipt (not sent on its own, EVM-T1).
+	ReceiptProof string `json:"receipt_proof,omitempty"`
 }
 
 type TransferParams struct {
@@ -23,6 +32,9 @@ type TransferParams struct {
 	TokenAddress string `json:"token_address"`
 	DeductFee    bool   `json:"deduct_fee"`
 	MaxFee       string `json:"max_fee"`
+	// GLAM-1: an ETH withdrawal's L1 gas limit (0 = the owner-set default).
+	// Within ETHTransferGas..MaxETHGasLimit. A token's is set at registration.
+	GasLimit uint64 `json:"gas_limit"`
 }
 
 type AllowanceParams struct {
@@ -36,13 +48,26 @@ type RegisterTokenParams struct {
 	Symbol        string `json:"symbol"`
 	Decimals      uint8  `json:"decimals"`
 	MinWithdrawal int64  `json:"min_withdrawal"`
+	// USDC-1 (option B): token units kept from a withdrawal whose L1 transfer
+	// reverts (e.g. to a blacklisted address); the rest is refunded. 0 = none.
+	// Must not exceed MinWithdrawal, so a refund is never negative.
+	RevertFee int64 `json:"revert_fee"`
+	// USDC-GAS-1: the L1 gas limit for this token's transfer (0 = the default
+	// ERC20TransferGas); within MinTokenGasLimit..MaxTokenGasLimit.
+	GasLimit uint64 `json:"gas_limit"`
 }
 
 type TokenInfo struct {
 	Symbol        string `json:"symbol"`
 	Decimals      uint8  `json:"decimals"`
 	MinWithdrawal int64  `json:"min_withdrawal"`
+	RevertFee     int64  `json:"revert_fee"`
+	GasLimit      uint64 `json:"gas_limit"`
 }
+
+// MinDeposit is the smallest deposit of the token that is credited (DUST-1):
+// a tenth of its minimum withdrawal.
+func (t *TokenInfo) MinDeposit() int64 { return t.MinWithdrawal / constants.MinDepositDivisor }
 
 // ConfirmSpendRequest carries both tx and receipt proofs for withdrawal
 // confirmation. W4 Cluster E CRIT #5 + HIGH #13 (D-E-1 + D-E-2 LOCKED): the
@@ -211,4 +236,34 @@ type ParsedLog struct {
 	Address [20]byte
 	Topics  [][32]byte
 	Data    []byte
+}
+
+// QueuedWithdrawal (RP-11) is a validated, debited withdrawal waiting for a
+// vault nonce. It is priced when it is issued (drainWithdrawalQueue), not
+// here: the newest proven header may be hours old while the bridge is idle.
+type QueuedWithdrawal struct {
+	Seq          uint64 `json:"seq"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Asset        string `json:"asset"`
+	TokenAddress string `json:"token_address,omitempty"`
+	// Amount is what the caller asked to withdraw (ETH: before a netted fee).
+	Amount *big.Int `json:"amount"`
+	// Debit is what left the owner's balance: ETH = Amount + FeeCap (fee on
+	// top) or Amount (DeductFee); ERC-20 = Amount. Refunded in full on cancel.
+	Debit *big.Int `json:"debit"`
+	// FeeCap (ETH only) is the fee the owner authorized; the priced fee must
+	// not exceed it, and the unused part is refunded at issue.
+	FeeCap    *big.Int `json:"fee_cap,omitempty"`
+	DeductFee bool     `json:"deduct_fee,omitempty"`
+	// ERC-20: snapshotted from the token registry at request time.
+	RevertFee *big.Int `json:"revert_fee,omitempty"`
+	GasLimit  uint64   `json:"gas_limit,omitempty"`
+	// MaxFee (ERC-20) is the caller's cap on the reserve-paid gas, if set.
+	MaxFee *big.Int `json:"max_fee,omitempty"`
+}
+
+// CancelQueuedParams names the queue entry to cancel (cancelQueuedWithdrawal).
+type CancelQueuedParams struct {
+	Seq uint64 `json:"seq"`
 }

@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"evm-mapping-contract/contract/blocklist"
@@ -34,9 +35,12 @@ var TransferEventSig = func() [32]byte { var h [32]byte; copy(h[:], transferEven
 // W4 Cluster B CRIT #6 Site 1: chainId threaded in so the parsed tx's
 // ChainId field is cross-checked BEFORE ecrecover spends cycles. Pre-fix
 // a chain-X tx could be replayed against the chain-Y bridge state.
+//
+// A01: isVault reports whether an address is one of the vault's fund-holding
+// generations (the caller records which one matched).
 func VerifyETHDeposit(
 	req *VerificationRequest,
-	vaultAddress [20]byte,
+	isVault func([20]byte) bool,
 	chainId uint64,
 ) ([20]byte, []byte, []byte, [32]byte, error) {
 	var sender [20]byte
@@ -93,8 +97,28 @@ func VerifyETHDeposit(
 	}
 
 	// Verify destination is vault
-	if parsedTx.To != vaultAddress {
+	if !isVault(parsedTx.To) {
 		return sender, nil, nil, txHash, ErrNotVaultDeposit
+	}
+
+	// FAILDEP-1: the tx must have succeeded. A reverted tx is in the block but
+	// moved no value; under Glamsterdam (EIP-8037) a transfer that creates the
+	// vault's account reverts at 21,000 gas, so before the first deposit anyone
+	// could mint by "sending" ETH they keep. The receipt at the same index
+	// (base64 proof, leaf = the receipt) must have status 1 (parseReceiptLogs).
+	if req.ReceiptProof == "" {
+		return sender, nil, nil, txHash, ce.NewContractError(ce.ErrInput, "an eth deposit needs receipt_proof (its status proves the value moved)")
+	}
+	rcptProof, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
+	if err != nil || len(rcptProof) == 0 {
+		return sender, nil, nil, txHash, ce.NewContractError(ce.ErrInput, "receipt_proof must be base64 (concatenated receipt-trie MPT nodes)")
+	}
+	receipt, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(rcptProof))
+	if err != nil {
+		return sender, nil, nil, txHash, ErrProofFailed
+	}
+	if _, err := parseReceiptLogs(receipt); err != nil {
+		return sender, nil, nil, txHash, ce.Prepend(err, "eth deposit receipt")
 	}
 
 	// Recover sender via ecrecover
@@ -131,9 +155,12 @@ func VerifyETHDeposit(
 // W4 Cluster B CRIT #6 Site 2: chainId threaded so the stored header's
 // ChainId field is cross-checked. Pre-fix the receipt-trie proof could be
 // valid but the underlying block could have come from a different chain.
+//
+// A01: isVault reports whether an address is one of the vault's fund-holding
+// generations (the caller records which one matched).
 func VerifyERC20Deposit(
 	req *VerificationRequest,
-	vaultAddress [20]byte,
+	isVault func([20]byte) bool,
 	tokenAddr [20]byte,
 	chainId uint64,
 ) ([20]byte, []byte, [32]byte, error) {
@@ -152,26 +179,42 @@ func VerifyERC20Deposit(
 		return sender, nil, txHash, ErrChainIdMismatch
 	}
 
-	receiptBytes, err := hex.DecodeString(req.RawHex)
-	if err != nil {
-		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
-	}
-
-	proofBytes, err := hex.DecodeString(req.MerkleProofHex)
-	if err != nil {
-		return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
-	}
-
-	proof := splitProofNodes(proofBytes)
+	// ERC20-PAYLOAD-1: the receipt proof may come base64 with the receipt as
+	// its leaf (receipt_proof, EVM-T1), or hex with the receipt sent again
+	// (raw_hex + merkle_proof_hex). The hex form carries the receipt four
+	// times over in the payload, so under the 8,192-byte cap a deposit in a
+	// tx with more than ~5 logs (an aggregator, a batch payout) could never be
+	// mapped; base64 fits ~4x the receipt. Both prove the same receipt and use
+	// the same observed key, so one cannot map a deposit the other did.
+	var receiptBytes []byte
 	key := mpt.RLPEncodeKey(req.TxIndex)
-
-	value, err := mpt.VerifyProof(header.ReceiptsRoot, key, proof)
-	if err != nil {
-		return sender, nil, txHash, ErrProofFailed
-	}
-
-	if !bytesEqual(value, receiptBytes) {
-		return sender, nil, txHash, ErrProofFailed
+	if req.ReceiptProof != "" {
+		proofBytes, err := base64.StdEncoding.DecodeString(req.ReceiptProof)
+		if err != nil || len(proofBytes) == 0 {
+			return sender, nil, txHash, ce.NewContractError(ce.ErrInput, "receipt_proof must be base64 (concatenated receipt-trie MPT nodes)")
+		}
+		value, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		receiptBytes = value
+	} else {
+		raw, err := hex.DecodeString(req.RawHex)
+		if err != nil {
+			return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
+		}
+		proofBytes, err := hex.DecodeString(req.MerkleProofHex)
+		if err != nil {
+			return sender, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
+		}
+		value, err := mpt.VerifyProof(header.ReceiptsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		if !bytesEqual(value, raw) {
+			return sender, nil, txHash, ErrProofFailed
+		}
+		receiptBytes = raw
 	}
 
 	// review6 M4: dedup key was previously keccak(receiptBytes), which is
@@ -221,9 +264,8 @@ func VerifyERC20Deposit(
 	// check on the vault topic too. We construct the canonical padded
 	// vault here, so the equality check below already catches non-canon
 	// high bytes; documented for clarity.
-	var vaultPadded [32]byte
-	copy(vaultPadded[12:], vaultAddress[:])
-	if log.Topics[2] != vaultPadded {
+	vaultAddress, canonical := topicAddress(log.Topics[2])
+	if !canonical || !isVault(vaultAddress) {
 		return sender, nil, txHash, ErrNotVaultDeposit
 	}
 
@@ -250,8 +292,18 @@ func VerifyERC20Deposit(
 		)
 	}
 
-	// Amount from log.Data (uint256, big-endian)
-	amount := log.Data
+	// RP-7: a transfer that paid a MagiDeposit deposit is credited to the
+	// recipient its Deposit log names (deposit_type "contract"), never here
+	// to the sender as well.
+	if transferPaysAContractDeposit(logs, int(req.LogIndex), vaultAddress) {
+		return sender, nil, txHash, ce.NewContractError(ce.ErrInput,
+			"this transfer paid a MagiDeposit deposit: map its Deposit log (deposit_type contract)")
+	}
+
+	amount, err := transferLogAmount(log.Data)
+	if err != nil {
+		return sender, nil, txHash, err
+	}
 
 	// CRIT #8 / W4 Cluster A: MarkObserved is NOT called here. The caller
 	// (HandleMap) records the observed slot only after the full deposit
@@ -259,14 +311,25 @@ func VerifyERC20Deposit(
 	return sender, amount, txHash, nil
 }
 
+// transferLogAmount reads the amount of an ERC-20 Transfer log. A standard
+// Transfer carries exactly one uint256 word; anything else (a non-standard or
+// upgraded token) is refused, so the credit can never exceed what the word
+// says (as confirmSpend and the MagiDeposit path already bound it). A06.
+func transferLogAmount(data []byte) ([]byte, error) {
+	if len(data) != 32 {
+		return nil, ce.NewContractError(ce.ErrInput, "Transfer data must be one 32-byte amount")
+	}
+	return data, nil
+}
+
 // parseTransaction decodes an RLP-encoded Ethereum transaction: legacy, or an
 // EIP-2718 typed transaction of type 1, 2, 3 or 4.
 //
 // E18: types 1 (EIP-2930), 3 (EIP-4844) and 4 (EIP-7702) used to be refused, so
 // ETH a user sent to the vault in one of them was never credited and had no
-// recovery path. A value transfer to the vault EOA succeeds whenever the tx is
-// included, whatever its type, so inclusion in the proven tx trie is as good a
-// deposit proof for these types as for type 2.
+// recovery path. A deposit's proof is the same for every type (inclusion in
+// the proven tx trie, and its receipt's success status, FAILDEP-1), so these
+// types are accepted like type 2.
 func parseTransaction(raw []byte) (*ParsedTx, error) {
 	if len(raw) == 0 {
 		return nil, ce.NewContractError(ce.ErrInput, "empty transaction")

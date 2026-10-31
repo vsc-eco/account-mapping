@@ -148,8 +148,8 @@ func TestA5_MalformedSwapRecipientNeverReachesTheRouter(t *testing.T) {
 	if dest == "" || strings.Contains(dest, "Alice") {
 		t.Errorf("deposit routed to %q, want the depositor", dest)
 	}
-	// Control: a valid swap_to does reach the router.
-	routeDeposit(sender, []string{"swap_to=hive:bob", "asset_out=hbd"}, "eth", big.NewInt(1000), 1)
+	// Control: a valid swap_to (with the depositor's min_amount_out, RP-8) does reach the router.
+	routeDeposit(sender, []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=1"}, "eth", big.NewInt(1000), 1)
 	if calls != 1 {
 		t.Errorf("router calls after a valid swap_to = %d, want 1", calls)
 	}

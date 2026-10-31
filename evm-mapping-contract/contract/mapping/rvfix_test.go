@@ -30,7 +30,9 @@ func TestE1_AssetAllowlist(t *testing.T) {
 	// After registration the symbol becomes an allowed ledger asset.
 	var tok [20]byte
 	tok[19] = 0xaa
-	RegisterToken(1, tok, "USDC", 6, 1000)
+	if err := RegisterToken(1, tok, "USDC", 6, 1000); err != nil {
+		t.Fatal(err)
+	}
 	if err := requireAllowedAsset("USDC"); err != nil {
 		t.Fatalf("a registered symbol must be allowed: %v", err)
 	}
