@@ -389,3 +389,29 @@ const DefaultMaxWithdrawPerBlockTokens = 100_000 // whole tokens, times 10^decim
 // it as the BTC contract's "th": any non-empty value halts this bridge's vault
 // keysigns; cleared only by deletion (clearTheftHalt).
 const TheftHaltKey = "th"
+
+// C2 custody proof (the THORChain solvency check for the EVM bridge's ETH):
+//   - SolvencyHaltKey: set (to the proof's block height) when the proven ETH of
+//     every fund-holding generation, at one stored header, is more than
+//     DefaultCustodyGapWei below the booked custody Supply("eth").Active;
+//     deleted when a later complete proof shows the custody is there. The node
+//     reads any value as a halt of this bridge's vault keysigns, like "th".
+//   - CustodyProofKey: the proof being assembled, "{height}|{gen}:{wei},...":
+//     two mainnet account proofs do not fit one 8 KB call, so each generation
+//     is proven in its own call at the same header.
+//   - CreditedDepositBlockKey: the newest L1 block a credited deposit came
+//     from; a custody proof at an older block would miss it.
+//   - CustodyCheckOffKey: the owner's switch (setCustodyCheck): while set,
+//     custody proofs are refused and no halt is held.
+const (
+	SolvencyHaltKey         = "si"
+	CustodyProofKey         = "cp"
+	CreditedDepositBlockKey = "mdb"
+	CustodyCheckOffKey      = "sio"
+)
+
+// DefaultCustodyGapWei: a shortfall up to this much is not a halt. Booked
+// custody is debited for gas at the estimate before the L1 tx mines and may
+// briefly lag only by the gas of in-flight sweeps (about 216,000 gas for an
+// ETH and three token sweeps: 0.043 ETH at 200 gwei).
+const DefaultCustodyGapWei = "50000000000000000" // 0.05 ETH

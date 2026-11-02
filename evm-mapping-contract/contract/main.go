@@ -439,6 +439,22 @@ func reportUnauthorizedSpend(input *string) *string {
 	return &out
 }
 
+// proveCustody (C2): anyone proves one fund-holding generation's ETH at a
+// stored header; once every generation is proven at that header, a shortfall
+// against the booked custody sets the solvency halt "si" (a full custody lifts
+// it). Not pause-gated.
+//
+//go:wasmexport proveCustody
+func proveCustody(input *string) *string {
+	var params mapping.ProveCustodyParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveCustody(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
@@ -1037,6 +1053,17 @@ func dispatchAdmin(action string, payload []byte) {
 		// P1: resuming this bridge's keysigns after a reported theft is the
 		// owner's deliberate call (the BTC contract's clearTheftHalt).
 		mapping.ClearTheftHalt()
+
+	case "setCustodyCheck":
+		// C2: the custody check's switch (THORChain StopSolvencyCheck), {"on":bool}.
+		// Off lifts a custody halt at once, so it is immediate like unpause.
+		var p struct {
+			On *bool `json:"on"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil || p.On == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setCustodyCheck: payload {on: bool}"))
+		}
+		mapping.SetCustodyCheck(*p.On)
 
 	case "pause":
 		sdk.StateSetObject(constants.PausedKey, "1")

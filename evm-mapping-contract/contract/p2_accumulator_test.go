@@ -50,3 +50,36 @@ func TestP2_CapAbove256BitsIsRefused(t *testing.T) {
 		t.Fatalf("cap after the refused set = %q, want the earlier 2^256-1", v)
 	}
 }
+
+// C2: setCustodyCheck through execute's dispatch takes {on: bool}; anything
+// else aborts and changes nothing.
+func TestC2_SetCustodyCheckDispatch(t *testing.T) {
+	sdk.ResetTestStateStore()
+	dispatch := func(payload string) (abort interface{}) {
+		defer func() { abort = recover() }()
+		dispatchAdmin("setCustodyCheck", []byte(payload))
+		return nil
+	}
+	if a := dispatch(`{}`); a == nil {
+		t.Fatal("setCustodyCheck without on was accepted")
+	}
+	if _, ok := sdk.TestStateGet(constants.CustodyCheckOffKey); ok {
+		t.Fatal("a refused setCustodyCheck wrote state")
+	}
+	sdk.StateSetObject(constants.SolvencyHaltKey, "100")
+	if a := dispatch(`{"on":false}`); a != nil {
+		t.Fatalf("off: %v", a)
+	}
+	if _, ok := sdk.TestStateGet(constants.CustodyCheckOffKey); !ok {
+		t.Fatal("off did not set the switch")
+	}
+	if _, ok := sdk.TestStateGet(constants.SolvencyHaltKey); ok {
+		t.Fatal("off did not lift the halt")
+	}
+	if a := dispatch(`{"on":true}`); a != nil {
+		t.Fatalf("on: %v", a)
+	}
+	if _, ok := sdk.TestStateGet(constants.CustodyCheckOffKey); ok {
+		t.Fatal("on did not clear the switch")
+	}
+}

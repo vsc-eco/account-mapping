@@ -56,6 +56,15 @@ func AssertNotPaused() error {
 // gated by relayer whitelist (ERC-20 stays permissionless because the
 // Transfer-log proof binds depositor cryptographically).
 func HandleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
+	if err := handleMap(params, vaultAddress, chainId); err != nil {
+		return err
+	}
+	// C2: a custody proof must be at least as new as every credited deposit.
+	noteCreditedDeposit(params.TxData.BlockHeight)
+	return nil
+}
+
+func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 	if isPaused() {
 		return ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
