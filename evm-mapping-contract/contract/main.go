@@ -421,6 +421,21 @@ func unmapETH(input *string) *string {
 	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
+// reportUnauthorizedSpend (P1): anyone proves a vault generation's address
+// sent a transaction the bridge never authorized; sets the theft halt. Not
+// pause-gated.
+//
+//go:wasmexport reportUnauthorizedSpend
+func reportUnauthorizedSpend(input *string) *string {
+	var params mapping.ReportUnauthorizedSpendParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleReportUnauthorizedSpend(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
@@ -1015,6 +1030,11 @@ func dispatchAdmin(action string, payload []byte) {
 		mapping.SetMaxWithdrawPerBlock(p.Asset, v)
 
 	// Emergency (Immediate, 0 blocks)
+	case "clearTheftHalt":
+		// P1: resuming this bridge's keysigns after a reported theft is the
+		// owner's deliberate call (the BTC contract's clearTheftHalt).
+		mapping.ClearTheftHalt()
+
 	case "pause":
 		sdk.StateSetObject(constants.PausedKey, "1")
 

@@ -97,7 +97,7 @@ func TimelockFor(action string) (uint64, error) {
 	// that and can then never sign again, so a 400K-block timelock left an
 	// owner who started the renewal after expiry ~3,200 blocks to spare. The
 	// BTC mapping contract's renewKey is owner-only and immediate too.
-	case "pause", "unpause", "renewKey":
+	case "pause", "unpause", "renewKey", "clearTheftHalt":
 		return TimelockImmediate, nil
 	default:
 		return 0, errors.New("unknown admin action: " + action)

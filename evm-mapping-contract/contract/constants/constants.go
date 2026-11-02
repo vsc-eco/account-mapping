@@ -384,3 +384,8 @@ const (
 var DefaultMaxWithdrawPerBlockETHWei = "25000000000000000000" // 25 ETH
 
 const DefaultMaxWithdrawPerBlockTokens = 100_000 // whole tokens, times 10^decimals
+
+// TheftHaltKey is the EVM bridge's theft flag (P1, BTC parity). The node reads
+// it as the BTC contract's "th": any non-empty value halts this bridge's vault
+// keysigns; cleared only by deletion (clearTheftHalt).
+const TheftHaltKey = "th"
