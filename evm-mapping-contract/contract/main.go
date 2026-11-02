@@ -601,19 +601,29 @@ func depositAddress(_ *string) *string {
 // SP-0b: the router registers every mapped asset by name and checks the
 // symbol getInfo returns, so with only ETH here no token (USDC) could ever be
 // registered or routed. A payload {"symbol":"usdc"} now answers for that
-// registered token; no payload, "eth", an unknown symbol or unparsable input
-// answer for ETH as before (the router then refuses a name that differs).
+// registered token, {"symbol":"eth"} for ETH, each with what a contract
+// withdrawing it needs: its proof fee (charged on top of a withdrawal, in the
+// asset's base units) and a token's L1 address (unmapERC20 takes it). No
+// payload, an unknown symbol or unparsable input answer the bare ETH record as
+// before (the router then refuses a name that differs).
 func getInfo(input *string) *string {
 	if input != nil && *input != "" {
 		var q struct {
 			Symbol string `json:"symbol"`
 		}
-		if json.Unmarshal([]byte(*input), &q) == nil && q.Symbol != "" && q.Symbol != constants.NativeAsset {
-			if t := mapping.TokenBySymbol(q.Symbol); t != nil {
-				b, err := json.Marshal(map[string]string{
+		if json.Unmarshal([]byte(*input), &q) == nil && q.Symbol != "" {
+			var rec map[string]string
+			if q.Symbol == constants.NativeAsset {
+				rec = map[string]string{"name": "Ether", "symbol": "ETH", "decimals": "18"}
+			} else if t, addr := mapping.TokenBySymbol(q.Symbol); t != nil {
+				rec = map[string]string{
 					"name": t.Symbol, "symbol": t.Symbol, "decimals": strconv.FormatUint(uint64(t.Decimals), 10),
-				})
-				if err == nil {
+					"token_address": addr,
+				}
+			}
+			if rec != nil {
+				rec["proof_fee"] = mapping.ProofFee(q.Symbol).String()
+				if b, err := json.Marshal(rec); err == nil {
 					out := string(b)
 					return &out
 				}

@@ -130,6 +130,9 @@ type PendingSpend struct {
 	// internal contract field and the JSON tag is omitempty so the field
 	// is absent for ETH withdrawals.
 	TokenAddress string `json:"token_address,omitempty"`
+	// RefundTo: where a refund goes when a contract withdrew for a user
+	// (QueuedWithdrawal.RefundTo); empty = From.
+	RefundTo string `json:"refund_to,omitempty"`
 	// GasCost is the gas-reserve amount (full wei) deducted when this
 	// withdrawal was submitted. Refunded by HandleConfirmSpend's failure
 	// branch (pentest finding EVM-C4). *big.Int + omitempty so ETH paths
@@ -162,6 +165,20 @@ func StorePendingSpend(ps PendingSpend) {
 		return
 	}
 	sdk.StateSetObject(key, string(jsonBytes))
+}
+
+// refundAccount is where a refund of ps goes.
+func (ps *PendingSpend) refundAccount() string {
+	if ps.RefundTo != "" {
+		return ps.RefundTo
+	}
+	return ps.From
+}
+
+// isWithdrawer reports whether id may act on ps as its owner (cancel, early
+// expire): the withdrawer, or the account its refunds go to.
+func (ps *PendingSpend) isWithdrawer(id string) bool {
+	return crypto.SameIdentity(id, ps.From) || (ps.RefundTo != "" && crypto.SameIdentity(id, ps.RefundTo))
 }
 
 func GetPendingSpend(nonce uint64) *PendingSpend {
@@ -420,7 +437,7 @@ func Enqueue(q QueuedWithdrawal) uint64 {
 			addQueuedDebit(q.Asset, q.Debit)
 		}
 	}
-	addCounter(constants.QueuedPerAccountPrefix+q.From, 1)
+	addCounter(constants.QueuedPerAccountPrefix+q.refundAccount(), 1)
 	return tail
 }
 
@@ -593,7 +610,7 @@ func RemoveQueued(seq uint64, q *QueuedWithdrawal) {
 				addQueuedDebit(q.Asset, new(big.Int).Neg(q.Debit))
 			}
 		}
-		addCounter(constants.QueuedPerAccountPrefix+q.From, -1)
+		addCounter(constants.QueuedPerAccountPrefix+q.refundAccount(), -1)
 	}
 	advanceQueueHead()
 }

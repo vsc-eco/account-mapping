@@ -249,6 +249,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
+	if err := checkRefundTo(caller, params.RefundTo); err != nil {
+		return "", err
+	}
 	gas, err := ethGasLimit(params.GasLimit)
 	if err != nil {
 		return "", err
@@ -300,7 +303,22 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		FeeCap:    feeCap,
 		DeductFee: params.DeductFee,
 		GasLimit:  gas,
+		RefundTo:  params.RefundTo,
 	}, vaultAddress, chainId)
+}
+
+// checkRefundTo admits a withdrawal's refund_to: only a contract caller may
+// name one (an account is its own refund address, and letting it name others
+// would let it spread past its queued-withdrawal cap), and it must be a Magi
+// identity, as a recipient.
+func checkRefundTo(caller, refundTo string) error {
+	if refundTo == "" {
+		return nil
+	}
+	if !strings.HasPrefix(caller, "contract:") {
+		return ce.NewContractError(ce.ErrInput, "refund_to is for a contract withdrawing on a user's behalf")
+	}
+	return requireValidRecipient(refundTo)
 }
 
 // errTokenGasLimit refuses gas_limit on a token withdrawal: its gas is paid
@@ -403,6 +421,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	if params.GasLimit != 0 {
 		return "", errTokenGasLimit
 	}
+	if err := checkRefundTo(caller, params.RefundTo); err != nil {
+		return "", err
+	}
 	tokenAddr, err := crypto.HexToAddress(params.TokenAddress)
 	if err != nil {
 		return "", ce.Prepend(err, "token_address")
@@ -456,6 +477,7 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		RevertFee:    big.NewInt(tokenInfo.RevertFee),
 		GasLimit:     tokenInfo.GasLimit,
 		MaxFee:       maxFee,
+		RefundTo:     params.RefundTo,
 	}, vaultAddress, chainId)
 }
 
@@ -1052,34 +1074,34 @@ func requireAllowedAsset(asset string) error {
 }
 
 // TokenBySymbol returns the registered token a symbol belongs to (ts- index,
-// M15-N5), or nil.
-func TokenBySymbol(symbol string) *TokenInfo {
+// M15-N5) and its L1 address ("0x..."), or nil.
+func TokenBySymbol(symbol string) (*TokenInfo, string) {
 	if symbol == "" {
-		return nil
+		return nil, ""
 	}
 	ref := sdk.StateGetObject(constants.TokenSymbolPrefix + symbol)
 	if ref == nil {
-		return nil
+		return nil, ""
 	}
 	i := strings.Index(*ref, constants.DirPathDelimiter)
 	if i < 0 {
-		return nil
+		return nil, ""
 	}
 	chainId, err := strconv.ParseUint((*ref)[:i], 10, 64)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	raw, err := hex.DecodeString((*ref)[i+1:])
 	if err != nil || len(raw) != 20 {
-		return nil
+		return nil, ""
 	}
 	var addr [20]byte
 	copy(addr[:], raw)
 	t := getTokenInfo(chainId, addr)
 	if t == nil || t.Symbol != symbol {
-		return nil
+		return nil, ""
 	}
-	return t
+	return t, "0x" + hex.EncodeToString(addr[:])
 }
 
 // getTokenInfo / RegisterToken — W4 Cluster B CRIT #6 Site 10: token
@@ -1649,7 +1671,7 @@ func refundDroppedWithdrawal(ps *PendingSpend) {
 	// would justify refunding gas; if it is ever re-enabled it must restore the
 	// gas/reserve on its own path, not here.
 	refund := new(big.Int).Set(ps.Amount)
-	IncBalance(ps.From, ps.Asset, refund)
+	IncBalance(ps.refundAccount(), ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, refund)
 	sup.User.Add(sup.User, refund)
@@ -1675,7 +1697,7 @@ func refundRevertedWithdrawal(ps *PendingSpend) {
 		IncBalance(constants.RevertFeeRecipient, ps.Asset, fee)
 		sdk.Log("revertfee|n=" + strconv.FormatUint(ps.Nonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + constants.RevertFeeRecipient)
 	}
-	IncBalance(ps.From, ps.Asset, refund)
+	IncBalance(ps.refundAccount(), ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, ps.Amount)
 	sup.User.Add(sup.User, ps.Amount)
@@ -1749,7 +1771,7 @@ func HandleExpireWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64) e
 
 	env := sdk.GetEnv()
 	caller := env.Caller.String()
-	isOriginalWithdrawer := crypto.SameIdentity(caller, ps.From)
+	isOriginalWithdrawer := ps.isWithdrawer(caller)
 	expiryHeight := ps.BlockHeight + constants.WithdrawalExpiryWindow
 	hasExpired := blocklist.GetLastHeight() >= expiryHeight
 
@@ -1820,7 +1842,7 @@ func HandleCancelMyWithdrawal(nonce uint64, proof L1ProofOfDrop, chainId uint64)
 		return errors.New("no pending spend at nonce")
 	}
 	env := sdk.GetEnv()
-	if !crypto.SameIdentity(env.Caller.String(), ps.From) {
+	if !ps.isWithdrawer(env.Caller.String()) {
 		return errors.New("cancelMyWithdrawal: only the original withdrawer can cancel")
 	}
 	if proof.Type == "" {

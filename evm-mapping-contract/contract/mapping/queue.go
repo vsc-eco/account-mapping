@@ -61,7 +61,7 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 	if QueuedLive() >= constants.MaxQueuedWithdrawals {
 		return "", ce.NewContractError(ce.ErrIntent, "withdrawal queue is full; try again later")
 	}
-	if queuedBy(q.From) >= constants.MaxQueuedPerAccount {
+	if queuedBy(q.refundAccount()) >= constants.MaxQueuedPerAccount {
 		return "", ce.NewContractError(ce.ErrIntent, "you have "+strconv.FormatUint(constants.MaxQueuedPerAccount, 10)+
 			" withdrawals queued; wait for them to go out (or cancel one) before queuing another")
 	}
@@ -174,7 +174,7 @@ const (
 // refundQueued returns a queued withdrawal's whole debit to its owner and
 // removes it (QFREEZE-1).
 func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
-	IncBalance(q.From, q.Asset, q.Debit)
+	IncBalance(q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapq|refund|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|why=" + why)
@@ -199,6 +199,7 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	ps := PendingSpend{
 		Nonce:        nonce,
 		From:         q.From,
+		RefundTo:     q.RefundTo,
 		To:           q.To,
 		Asset:        q.Asset,
 		TokenAddress: q.TokenAddress,
@@ -233,7 +234,7 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 			// Fee on top: the caller authorized FeeCap; return what the
 			// priced fee does not use.
 			if unused := new(big.Int).Sub(q.FeeCap, feeWei); unused.Sign() > 0 {
-				IncBalance(q.From, constants.NativeAsset, unused)
+				IncBalance(q.refundAccount(), constants.NativeAsset, unused)
 				trackRefund(constants.NativeAsset, unused)
 			}
 			userCost.Add(q.Amount, feeWei)
@@ -317,10 +318,11 @@ func HandleCancelQueuedWithdrawal(seq uint64) error {
 	}
 	caller := env.Caller.String()
 	owner := sdk.GetEnvKey("contract.owner")
-	if !crypto.SameIdentity(caller, q.From) && (owner == nil || caller != *owner) {
+	beneficiary := q.RefundTo != "" && crypto.SameIdentity(caller, q.RefundTo)
+	if !crypto.SameIdentity(caller, q.From) && !beneficiary && (owner == nil || caller != *owner) {
 		return errors.New("cancelQueuedWithdrawal: only the withdrawal's owner or the contract owner can cancel it")
 	}
-	IncBalance(q.From, q.Asset, q.Debit)
+	IncBalance(q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|by=" + caller)
