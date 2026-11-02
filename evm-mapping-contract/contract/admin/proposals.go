@@ -90,7 +90,7 @@ func TimelockFor(action string) (uint64, error) {
 	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
 	case "registerToken", "registerRouter", "setETHGasLimit", "setProofFee", "setTokenGasRate",
-		"registerRelayer", "deregisterRelayer", "clearTestnetState":
+		"registerRelayer", "deregisterRelayer", "clearTestnetState", "setMaxWithdrawPerBlock":
 		return TimelockOperational, nil
 	// D7: renewKey only extends the vault key's life and moves nothing. The
 	// key expires after 365 epochs (~91 days), retires 403,200 blocks after

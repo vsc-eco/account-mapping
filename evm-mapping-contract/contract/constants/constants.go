@@ -367,3 +367,20 @@ const (
 	MigrationSweepsKey   = "msr"
 	SweepNoncePrefix     = "msn" + DirPathDelimiter
 )
+
+// P2 (BTC-C3 parity, btc-mapping-contract setMaxUnmapPerBlock): the most of
+// one asset that withdrawals may debit in one Hive block. Set per asset by
+// the owner (setMaxWithdrawPerBlock, operational timelock; 0 turns the limit
+// off); unset, the defaults below apply. The BTC contract's default is 1 BTC
+// per block; the ETH default is about the same value, the ERC-20 default is
+// 100,000 whole tokens (about that for a dollar stablecoin; the owner sets
+// other tokens). Tighten as the bridge's value grows; pause is the instant
+// brake.
+const (
+	MaxWithdrawPerBlockPrefix = "mwb" + DirPathDelimiter // mwb-{asset} -> decimal cap ("0": off)
+	WithdrawBlockAccPrefix    = "wba" + DirPathDelimiter // wba-{asset} -> "{hive block}:{debited}"
+)
+
+var DefaultMaxWithdrawPerBlockETHWei = "25000000000000000000" // 25 ETH
+
+const DefaultMaxWithdrawPerBlockTokens = 100_000 // whole tokens, times 10^decimals

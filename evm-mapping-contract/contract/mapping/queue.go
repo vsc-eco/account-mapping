@@ -30,6 +30,24 @@ import (
 // vault is the vault the unmap handler was given (main passes vault(), the TSS
 // key's verified address; zero when there is none, and then nothing issues).
 func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (string, error) {
+	// P2 (BTC-C3): every unmap path (ETH, ERC-20, unmapFrom) has debited the
+	// owner just before this call; charge that debit against the asset's
+	// per-Hive-block cap, as the BTC contract charges each unmap at its debit.
+	debit := q.Debit
+	if debit == nil {
+		debit = q.Amount
+	}
+	decimals := uint8(18)
+	if q.Asset != constants.NativeAsset {
+		if addr, err := crypto.HexToAddress(q.TokenAddress); err == nil {
+			if info := getTokenInfo(chainId, addr); info != nil {
+				decimals = info.Decimals
+			}
+		}
+	}
+	if err := checkAndUpdateWithdrawRateLimit(sdk.GetEnv().BlockHeight, q.Asset, decimals, debit); err != nil {
+		return "", err
+	}
 	next := GetPendingNonce()
 	// Nothing waiting: issue now, without writing a queue entry that the same
 	// call would delete (a state write costs RC even when it is undone).

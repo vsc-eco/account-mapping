@@ -995,6 +995,25 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 		}
 
+	case "setMaxWithdrawPerBlock":
+		// P2 (BTC-C3 parity): the per-Hive-block withdrawal cap of one asset
+		// ("eth" or a registered token symbol); "0" turns it off.
+		var p struct {
+			Asset  string `json:"asset"`
+			Amount string `json:"amount"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil || p.Asset == "" {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: payload {asset, amount}"))
+		}
+		v, ok := new(big.Int).SetString(strings.TrimSpace(p.Amount), 10)
+		if !ok || v.Sign() < 0 {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: amount must be a non-negative integer"))
+		}
+		if p.Asset != constants.NativeAsset && sdk.StateGetObject(constants.AllowedSymbolPrefix+p.Asset) == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: unknown asset "+p.Asset))
+		}
+		mapping.SetMaxWithdrawPerBlock(p.Asset, v)
+
 	// Emergency (Immediate, 0 blocks)
 	case "pause":
 		sdk.StateSetObject(constants.PausedKey, "1")
