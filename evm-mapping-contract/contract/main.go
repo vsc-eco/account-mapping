@@ -597,7 +597,29 @@ func depositAddress(_ *string) *string {
 // JSON {"name":"Ether","symbol":"ETH","decimals":"18"} for the
 // primary mapping; matches the BTC mapping contract's getInfo
 // shape and the dex-contracts/types.MappingContractInfoReturn.
-func getInfo(_ *string) *string {
+//
+// SP-0b: the router registers every mapped asset by name and checks the
+// symbol getInfo returns, so with only ETH here no token (USDC) could ever be
+// registered or routed. A payload {"symbol":"usdc"} now answers for that
+// registered token; no payload, "eth", an unknown symbol or unparsable input
+// answer for ETH as before (the router then refuses a name that differs).
+func getInfo(input *string) *string {
+	if input != nil && *input != "" {
+		var q struct {
+			Symbol string `json:"symbol"`
+		}
+		if json.Unmarshal([]byte(*input), &q) == nil && q.Symbol != "" && q.Symbol != constants.NativeAsset {
+			if t := mapping.TokenBySymbol(q.Symbol); t != nil {
+				b, err := json.Marshal(map[string]string{
+					"name": t.Symbol, "symbol": t.Symbol, "decimals": strconv.FormatUint(uint64(t.Decimals), 10),
+				})
+				if err == nil {
+					out := string(b)
+					return &out
+				}
+			}
+		}
+	}
 	info := `{"name":"Ether","symbol":"ETH","decimals":"18"}`
 	return &info
 }

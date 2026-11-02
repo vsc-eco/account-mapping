@@ -1051,6 +1051,37 @@ func requireAllowedAsset(asset string) error {
 	return nil
 }
 
+// TokenBySymbol returns the registered token a symbol belongs to (ts- index,
+// M15-N5), or nil.
+func TokenBySymbol(symbol string) *TokenInfo {
+	if symbol == "" {
+		return nil
+	}
+	ref := sdk.StateGetObject(constants.TokenSymbolPrefix + symbol)
+	if ref == nil {
+		return nil
+	}
+	i := strings.Index(*ref, constants.DirPathDelimiter)
+	if i < 0 {
+		return nil
+	}
+	chainId, err := strconv.ParseUint((*ref)[:i], 10, 64)
+	if err != nil {
+		return nil
+	}
+	raw, err := hex.DecodeString((*ref)[i+1:])
+	if err != nil || len(raw) != 20 {
+		return nil
+	}
+	var addr [20]byte
+	copy(addr[:], raw)
+	t := getTokenInfo(chainId, addr)
+	if t == nil || t.Symbol != symbol {
+		return nil
+	}
+	return t
+}
+
 // getTokenInfo / RegisterToken — W4 Cluster B CRIT #6 Site 10: token
 // registry now keyed by (chainId, addr) so the same ERC-20 address on
 // different chains is a distinct registry entry. Pre-fix the registry
