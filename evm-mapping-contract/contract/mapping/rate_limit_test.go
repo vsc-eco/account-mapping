@@ -70,7 +70,7 @@ func TestP2_OffAndTokenDefault(t *testing.T) {
 // contract's 16-byte accumulator, widened for wei). Real-wasm: GLAM-1's first
 // unmapETH stays inside the 10,000 RC free tier.
 func TestP2_AccumulatorIsFixedWidth(t *testing.T) {
-	rpBridge(t, ethWei(1000), "hive:alice") // alice holds 10 ETH
+	rpBridge(t, ethWei(1000), "hive:alice")       // alice holds 10 ETH
 	SetMaxWithdrawPerBlock("eth", ethWei(25_000)) // 25 ETH
 	width := func(when string) {
 		t.Helper()
@@ -94,7 +94,7 @@ func TestP2_AccumulatorIsFixedWidth(t *testing.T) {
 	}
 	as(t, "hive:alice", rpNow)
 	sdk.SetTestBlockHeight(1 << 40) // a large height, next block
-	w("9000000000000000000") // 9 ETH: a large amount
+	w("9000000000000000000")        // 9 ETH: a large amount
 	width("large amount, later block")
 	if h, acc2 := loadWithdrawAccumulator("eth"); h != 1<<40 || acc2.Cmp(acc) <= 0 {
 		t.Fatalf("stored block %d amount %s after the second block", h, acc2)
