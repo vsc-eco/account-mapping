@@ -161,6 +161,9 @@ func initContract(input *string) *string {
 	if params.CreateKey {
 		createPrimaryKey()
 	}
+	// P2: the ETH withdrawal accumulator exists from the start, so no user's
+	// withdrawal pays to create it (registerToken does the same per token).
+	mapping.EnsureWithdrawAccumulator(constants.NativeAsset)
 	sdk.StateSetObject(constants.InitMarkerKey, "1")
 	return nil
 }
@@ -1021,8 +1024,8 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: payload {asset, amount}"))
 		}
 		v, ok := new(big.Int).SetString(strings.TrimSpace(p.Amount), 10)
-		if !ok || v.Sign() < 0 {
-			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: amount must be a non-negative integer"))
+		if !ok || v.Sign() < 0 || v.BitLen() > mapping.MaxWithdrawPerBlockBits {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: amount must be an integer from 0 to 2^256-1"))
 		}
 		if p.Asset != constants.NativeAsset && sdk.StateGetObject(constants.AllowedSymbolPrefix+p.Asset) == nil {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: unknown asset "+p.Asset))

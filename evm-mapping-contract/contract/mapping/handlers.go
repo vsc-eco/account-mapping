@@ -1121,6 +1121,8 @@ func RegisterTokenFull(chainId uint64, addr [20]byte, symbol string, decimals ui
 	sdk.StateSetObject(constants.AllowedSymbolPrefix+symbol, "1")
 	sdk.StateSetObject(constants.TokenSymbolPrefix+symbol, ref)
 	indexTokenSymbol(symbol) // A01: a rotation books every registered asset
+	// P2: the withdrawal accumulator is created here, not by a user's withdrawal.
+	EnsureWithdrawAccumulator(symbol)
 	return nil
 }
 

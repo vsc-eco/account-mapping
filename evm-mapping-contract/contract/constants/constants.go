@@ -378,7 +378,7 @@ const (
 // brake.
 const (
 	MaxWithdrawPerBlockPrefix = "mwb" + DirPathDelimiter // mwb-{asset} -> decimal cap ("0": off)
-	WithdrawBlockAccPrefix    = "wba" + DirPathDelimiter // wba-{asset} -> "{hive block}:{debited}"
+	WithdrawBlockAccPrefix    = "wba" + DirPathDelimiter // wba-{asset} -> 8-byte Hive block + 32-byte debited, big-endian
 )
 
 var DefaultMaxWithdrawPerBlockETHWei = "25000000000000000000" // 25 ETH
