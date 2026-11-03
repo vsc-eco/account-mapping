@@ -96,6 +96,9 @@ func TestA01_DepositsReachEveryFundHoldingGeneration(t *testing.T) {
 		if err := HandleMap(&MapParams{TxData: req}, active, 11155111); err != nil {
 			t.Fatalf("%v: native ETH to the superseded generation: %v", st, err)
 		}
+		if CreditedDepositBlock() < req.BlockHeight { // C2: custody proofs must not be older
+			t.Fatalf("%v: credited deposit block %d, want >= %d", st, CreditedDepositBlock(), req.BlockHeight)
+		}
 		want := new(big.Int).Add(big.NewInt(3e16), wei(faildep1Value))
 		if b := VaultBook(0, "eth"); b.Cmp(want) != 0 {
 			t.Fatalf("%v: eth book %s, want %s", st, b, want)

@@ -35,6 +35,13 @@ type TransferParams struct {
 	// GLAM-1: an ETH withdrawal's L1 gas limit (0 = the owner-set default).
 	// Within ETHTransferGas..MaxETHGasLimit. A token's is set at registration.
 	GasLimit uint64 `json:"gas_limit"`
+	// RefundTo (unmapETH / unmapERC20, contract callers only): the Magi
+	// account a refund of this withdrawal goes to instead of the caller. A
+	// contract that withdraws on a user's behalf (the DEX router settling a
+	// swap to Ethereum) cannot spend a refund credited to itself; naming the
+	// user keeps the money theirs (THORChain's refund address, Across's
+	// depositor).
+	RefundTo string `json:"refund_to,omitempty"`
 }
 
 type AllowanceParams struct {
@@ -261,6 +268,17 @@ type QueuedWithdrawal struct {
 	GasLimit  uint64   `json:"gas_limit,omitempty"`
 	// MaxFee (ERC-20) is the caller's cap on the reserve-paid gas, if set.
 	MaxFee *big.Int `json:"max_fee,omitempty"`
+	// RefundTo: where refunds go when a contract withdrew for a user (see
+	// TransferParams.RefundTo); empty = From.
+	RefundTo string `json:"refund_to,omitempty"`
+}
+
+// refundAccount is where q's refunds go and whose queue slots it uses.
+func (q *QueuedWithdrawal) refundAccount() string {
+	if q.RefundTo != "" {
+		return q.RefundTo
+	}
+	return q.From
 }
 
 // CancelQueuedParams names the queue entry to cancel (cancelQueuedWithdrawal).

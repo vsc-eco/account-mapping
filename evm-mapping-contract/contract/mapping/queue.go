@@ -30,6 +30,24 @@ import (
 // vault is the vault the unmap handler was given (main passes vault(), the TSS
 // key's verified address; zero when there is none, and then nothing issues).
 func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (string, error) {
+	// P2 (BTC-C3): every unmap path (ETH, ERC-20, unmapFrom) has debited the
+	// owner just before this call; charge that debit against the asset's
+	// per-Hive-block cap, as the BTC contract charges each unmap at its debit.
+	debit := q.Debit
+	if debit == nil {
+		debit = q.Amount
+	}
+	decimals := uint8(18)
+	if q.Asset != constants.NativeAsset {
+		if addr, err := crypto.HexToAddress(q.TokenAddress); err == nil {
+			if info := getTokenInfo(chainId, addr); info != nil {
+				decimals = info.Decimals
+			}
+		}
+	}
+	if err := checkAndUpdateWithdrawRateLimit(sdk.GetEnv().BlockHeight, q.Asset, decimals, debit); err != nil {
+		return "", err
+	}
 	next := GetPendingNonce()
 	// Nothing waiting: issue now, without writing a queue entry that the same
 	// call would delete (a state write costs RC even when it is undone).
@@ -43,7 +61,7 @@ func submitWithdrawal(q QueuedWithdrawal, vault [20]byte, chainId uint64) (strin
 	if QueuedLive() >= constants.MaxQueuedWithdrawals {
 		return "", ce.NewContractError(ce.ErrIntent, "withdrawal queue is full; try again later")
 	}
-	if queuedBy(q.From) >= constants.MaxQueuedPerAccount {
+	if queuedBy(q.refundAccount()) >= constants.MaxQueuedPerAccount {
 		return "", ce.NewContractError(ce.ErrIntent, "you have "+strconv.FormatUint(constants.MaxQueuedPerAccount, 10)+
 			" withdrawals queued; wait for them to go out (or cancel one) before queuing another")
 	}
@@ -156,7 +174,7 @@ const (
 // refundQueued returns a queued withdrawal's whole debit to its owner and
 // removes it (QFREEZE-1).
 func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
-	IncBalance(q.From, q.Asset, q.Debit)
+	IncBalance(q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapq|refund|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|why=" + why)
@@ -181,6 +199,7 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 	ps := PendingSpend{
 		Nonce:        nonce,
 		From:         q.From,
+		RefundTo:     q.RefundTo,
 		To:           q.To,
 		Asset:        q.Asset,
 		TokenAddress: q.TokenAddress,
@@ -215,7 +234,7 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 			// Fee on top: the caller authorized FeeCap; return what the
 			// priced fee does not use.
 			if unused := new(big.Int).Sub(q.FeeCap, feeWei); unused.Sign() > 0 {
-				IncBalance(q.From, constants.NativeAsset, unused)
+				IncBalance(q.refundAccount(), constants.NativeAsset, unused)
 				trackRefund(constants.NativeAsset, unused)
 			}
 			userCost.Add(q.Amount, feeWei)
@@ -299,10 +318,11 @@ func HandleCancelQueuedWithdrawal(seq uint64) error {
 	}
 	caller := env.Caller.String()
 	owner := sdk.GetEnvKey("contract.owner")
-	if !crypto.SameIdentity(caller, q.From) && (owner == nil || caller != *owner) {
+	beneficiary := q.RefundTo != "" && crypto.SameIdentity(caller, q.RefundTo)
+	if !crypto.SameIdentity(caller, q.From) && !beneficiary && (owner == nil || caller != *owner) {
 		return errors.New("cancelQueuedWithdrawal: only the withdrawal's owner or the contract owner can cancel it")
 	}
-	IncBalance(q.From, q.Asset, q.Debit)
+	IncBalance(q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|by=" + caller)

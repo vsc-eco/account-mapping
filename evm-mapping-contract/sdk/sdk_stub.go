@@ -5,6 +5,7 @@ package sdk
 import (
 	"encoding/hex"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
@@ -325,6 +326,12 @@ func ResetTestState() {
 func SetTestEnv(caller, sender string) {
 	testEnvJSON = `{"contract.id":"contract:test","msg.caller":"` + caller +
 		`","msg.sender":"` + sender + `","msg.required_auths":["` + sender + `"]}`
+}
+
+// SetTestBlockHeight sets block.height in the env of subsequent handler calls
+// (call it after SetTestEnv / SetTestCaller, which rebuild the env).
+func SetTestBlockHeight(h uint64) {
+	testEnvJSON = `{"block.height":` + strconv.FormatUint(h, 10) + `,` + strings.TrimPrefix(testEnvJSON, "{")
 }
 
 // SetTestCaller is shorthand for SetTestEnv(addr, addr).

@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"math/big"
+	"evm-mapping-contract/contract/mapping"
+	"evm-mapping-contract/sdk"
 	"strings"
 	"testing"
 )
@@ -61,5 +64,63 @@ func TestF3_GetInfoReturnsEthMetadata(t *testing.T) {
 	}
 	if info.Decimals != "18" {
 		t.Errorf("expected decimals \"18\" (ETH), got %q", info.Decimals)
+	}
+}
+
+// SP-0b: the DEX router registers a mapped asset by name and requires the
+// symbol getInfo returns to equal it. With only ETH here, USDC could never be
+// registered on the router, so no USDC pool could be routed (and an EVM
+// deposit-and-swap to USDC always fell back to an unswapped credit). getInfo
+// now answers for the token a payload names.
+func TestSP0b_GetInfoAnswersForARegisteredToken(t *testing.T) {
+	sdk.ResetStubState()
+	usdc := [20]byte{0x1c, 0x7d, 0x4b, 0x19}
+	if err := mapping.RegisterToken(11155111, usdc, "usdc", 6, 1); err != nil {
+		t.Fatal(err)
+	}
+	read := func(payload *string) (sym, dec string) {
+		t.Helper()
+		var info struct {
+			Symbol   string `json:"symbol"`
+			Decimals string `json:"decimals"`
+		}
+		res := getInfo(payload)
+		if res == nil {
+			t.Fatal("nil getInfo")
+		}
+		if err := json.Unmarshal([]byte(*res), &info); err != nil {
+			t.Fatalf("bad json %q: %v", *res, err)
+		}
+		return info.Symbol, info.Decimals
+	}
+	p := func(s string) *string { return &s }
+
+	if s, d := read(p(`{"symbol":"usdc"}`)); s != "usdc" || d != "6" {
+		t.Fatalf("usdc: %s/%s, want usdc/6", s, d)
+	}
+	for _, in := range []*string{nil, p(""), p(`{"symbol":"eth"}`), p(`{"symbol":"dai"}`), p(`not json`), p(`{"symbol":""}`)} {
+		if s, d := read(in); s != "ETH" || d != "18" {
+			t.Fatalf("payload %v: %s/%s, want the ETH default", in, s, d)
+		}
+	}
+
+	// What a withdrawing contract needs: the proof fee and the token address.
+	mapping.SetProofFee("usdc", big.NewInt(150000))
+	mapping.SetProofFee("eth", big.NewInt(50000000000000))
+	var full struct {
+		ProofFee     string `json:"proof_fee"`
+		TokenAddress string `json:"token_address"`
+	}
+	json.Unmarshal([]byte(*getInfo(p(`{"symbol":"usdc"}`))), &full)
+	if full.ProofFee != "150000" || full.TokenAddress != "0x1c7d4b1900000000000000000000000000000000" {
+		t.Fatalf("usdc record: %+v", full)
+	}
+	full.TokenAddress = ""
+	json.Unmarshal([]byte(*getInfo(p(`{"symbol":"eth"}`))), &full)
+	if full.ProofFee != "50000000000000" || full.TokenAddress != "" {
+		t.Fatalf("eth record: %+v", full)
+	}
+	if bare := *getInfo(nil); bare != `{"name":"Ether","symbol":"ETH","decimals":"18"}` {
+		t.Fatalf("no payload must answer the bare ETH record, got %s", bare)
 	}
 }

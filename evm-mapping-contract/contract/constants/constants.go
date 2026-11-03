@@ -367,3 +367,66 @@ const (
 	MigrationSweepsKey   = "msr"
 	SweepNoncePrefix     = "msn" + DirPathDelimiter
 )
+
+// P2 (BTC-C3 parity, btc-mapping-contract setMaxUnmapPerBlock): the most of
+// one asset that withdrawals may debit in one Hive block. Set per asset by
+// the owner (setMaxWithdrawPerBlock, operational timelock; 0 turns the limit
+// off); unset, the defaults below apply. The BTC contract's default is 1 BTC
+// per block; the ETH default is about the same value, the ERC-20 default is
+// 100,000 whole tokens (about that for a dollar stablecoin; the owner sets
+// other tokens). Tighten as the bridge's value grows; pause is the instant
+// brake.
+const (
+	MaxWithdrawPerBlockPrefix = "mwb" + DirPathDelimiter // mwb-{asset} -> decimal cap ("0": off)
+	WithdrawBlockAccPrefix    = "wba" + DirPathDelimiter // wba-{asset} -> 8-byte Hive block + 32-byte debited, big-endian
+)
+
+var DefaultMaxWithdrawPerBlockETHWei = "25000000000000000000" // 25 ETH
+
+const DefaultMaxWithdrawPerBlockTokens = 100_000 // whole tokens, times 10^decimals
+
+// TheftHaltKey is the EVM bridge's theft flag (P1, BTC parity). The node reads
+// it as the BTC contract's "th": any non-empty value halts this bridge's vault
+// keysigns; cleared only by deletion (clearTheftHalt).
+const TheftHaltKey = "th"
+
+// C2 custody proof (the THORChain solvency check for the EVM bridge's ETH):
+//   - SolvencyHaltKey: set (to the proof's block height) when the proven ETH of
+//     every fund-holding generation, at one stored header, is more than
+//     DefaultCustodyGapWei below the booked custody Supply("eth").Active;
+//     deleted when a later complete proof shows the custody is there. The node
+//     reads any value as a halt of this bridge's vault keysigns, like "th".
+//   - CustodyProofKey: the proof being assembled, "{height}|{gen}:{wei},...":
+//     two mainnet account proofs do not fit one 8 KB call, so each generation
+//     is proven in its own call at the same header.
+//   - CreditedDepositBlockKey: the newest L1 block a credited deposit came
+//     from; a custody proof at an older block would miss it.
+//   - CustodyCheckOffKey: the owner's switch (setCustodyCheck): while set,
+//     custody proofs are refused and no halt is held.
+const (
+	SolvencyHaltKey         = "si"
+	CustodyProofKey         = "cp"
+	CreditedDepositBlockKey = "mdb"
+	CustodyCheckOffKey      = "sio"
+)
+
+// Per-asset custody (C2 for ERC-20s, token_custody.go):
+//   - AssetShortPrefix+{asset}: the block height of the newest complete proof
+//     that found that asset short ("eth" included). "si" is set with the first
+//     short asset and deleted only when no asset is short, so one asset's
+//     proof never lifts another's halt.
+//   - TokenCustodyConfigPrefix+{symbol}: where the token keeps a holder's
+//     balance, "{slot}|{bits}|{gap}" (owner, setTokenCustody).
+//   - TokenCustodyProofPrefix+{symbol}: the token proof being assembled,
+//     "{height}|{storage root hex}|{gen}:{amount},...".
+const (
+	AssetShortPrefix         = "sis" + DirPathDelimiter
+	TokenCustodyConfigPrefix = "tcc" + DirPathDelimiter
+	TokenCustodyProofPrefix  = "tcp" + DirPathDelimiter
+)
+
+// DefaultCustodyGapWei: a shortfall up to this much is not a halt. Booked
+// custody is debited for gas at the estimate before the L1 tx mines and may
+// briefly lag only by the gas of in-flight sweeps (about 216,000 gas for an
+// ETH and three token sweeps: 0.043 ETH at 200 gwei).
+const DefaultCustodyGapWei = "50000000000000000" // 0.05 ETH

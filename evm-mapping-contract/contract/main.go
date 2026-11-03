@@ -161,6 +161,9 @@ func initContract(input *string) *string {
 	if params.CreateKey {
 		createPrimaryKey()
 	}
+	// P2: the ETH withdrawal accumulator exists from the start, so no user's
+	// withdrawal pays to create it (registerToken does the same per token).
+	mapping.EnsureWithdrawAccumulator(constants.NativeAsset)
 	sdk.StateSetObject(constants.InitMarkerKey, "1")
 	return nil
 }
@@ -421,6 +424,65 @@ func unmapETH(input *string) *string {
 	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
+// reportUnauthorizedSpend (P1): anyone proves a vault generation's address
+// sent a transaction the bridge never authorized; sets the theft halt. Not
+// pause-gated.
+//
+//go:wasmexport reportUnauthorizedSpend
+func reportUnauthorizedSpend(input *string) *string {
+	var params mapping.ReportUnauthorizedSpendParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleReportUnauthorizedSpend(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+// proveCustody (C2): anyone proves one fund-holding generation's ETH at a
+// stored header; once every generation is proven at that header, a shortfall
+// against the booked custody sets the solvency halt "si" (a full custody lifts
+// it). Not pause-gated.
+//
+//go:wasmexport proveCustody
+func proveCustody(input *string) *string {
+	var params mapping.ProveCustodyParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveCustody(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+// proveTokenRoot / proveTokenCustody (C2 for tokens): anyone proves a
+// registered token's storage root at a stored header, then each fund-holding
+// generation's balance against it; the complete set compared with the token's
+// booked custody sets or clears that token's short flag and "si". Not
+// pause-gated.
+//
+//go:wasmexport proveTokenRoot
+func proveTokenRoot(input *string) *string {
+	var params mapping.ProveTokenRootParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveTokenRoot(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport proveTokenCustody
+func proveTokenCustody(input *string) *string {
+	var params mapping.ProveTokenCustodyParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveTokenCustody(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
@@ -563,7 +625,39 @@ func depositAddress(_ *string) *string {
 // JSON {"name":"Ether","symbol":"ETH","decimals":"18"} for the
 // primary mapping; matches the BTC mapping contract's getInfo
 // shape and the dex-contracts/types.MappingContractInfoReturn.
-func getInfo(_ *string) *string {
+//
+// SP-0b: the router registers every mapped asset by name and checks the
+// symbol getInfo returns, so with only ETH here no token (USDC) could ever be
+// registered or routed. A payload {"symbol":"usdc"} now answers for that
+// registered token, {"symbol":"eth"} for ETH, each with what a contract
+// withdrawing it needs: its proof fee (charged on top of a withdrawal, in the
+// asset's base units) and a token's L1 address (unmapERC20 takes it). No
+// payload, an unknown symbol or unparsable input answer the bare ETH record as
+// before (the router then refuses a name that differs).
+func getInfo(input *string) *string {
+	if input != nil && *input != "" {
+		var q struct {
+			Symbol string `json:"symbol"`
+		}
+		if json.Unmarshal([]byte(*input), &q) == nil && q.Symbol != "" {
+			var rec map[string]string
+			if q.Symbol == constants.NativeAsset {
+				rec = map[string]string{"name": "Ether", "symbol": "ETH", "decimals": "18"}
+			} else if t, addr := mapping.TokenBySymbol(q.Symbol); t != nil {
+				rec = map[string]string{
+					"name": t.Symbol, "symbol": t.Symbol, "decimals": strconv.FormatUint(uint64(t.Decimals), 10),
+					"token_address": addr,
+				}
+			}
+			if rec != nil {
+				rec["proof_fee"] = mapping.ProofFee(q.Symbol).String()
+				if b, err := json.Marshal(rec); err == nil {
+					out := string(b)
+					return &out
+				}
+			}
+		}
+	}
 	info := `{"name":"Ether","symbol":"ETH","decimals":"18"}`
 	return &info
 }
@@ -995,7 +1089,53 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, err.Error()))
 		}
 
+	case "setMaxWithdrawPerBlock":
+		// P2 (BTC-C3 parity): the per-Hive-block withdrawal cap of one asset
+		// ("eth" or a registered token symbol); "0" turns it off.
+		var p struct {
+			Asset  string `json:"asset"`
+			Amount string `json:"amount"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil || p.Asset == "" {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: payload {asset, amount}"))
+		}
+		v, ok := new(big.Int).SetString(strings.TrimSpace(p.Amount), 10)
+		if !ok || v.Sign() < 0 || v.BitLen() > mapping.MaxWithdrawPerBlockBits {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: amount must be an integer from 0 to 2^256-1"))
+		}
+		if p.Asset != constants.NativeAsset && sdk.StateGetObject(constants.AllowedSymbolPrefix+p.Asset) == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: unknown asset "+p.Asset))
+		}
+		mapping.SetMaxWithdrawPerBlock(p.Asset, v)
+
+	case "setTokenCustody":
+		// C2 for tokens: where a registered token keeps a holder's balance
+		// {asset, slot, bits, gap} (USDC v2.2: slot 9, bits 255).
+		var p mapping.SetTokenCustodyParams
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenCustody: payload {asset, slot, bits, gap}"))
+		}
+		if err := mapping.SetTokenCustody(&p); err != nil {
+			ce.CustomAbort(err)
+		}
+
 	// Emergency (Immediate, 0 blocks)
+	case "clearTheftHalt":
+		// P1: resuming this bridge's keysigns after a reported theft is the
+		// owner's deliberate call (the BTC contract's clearTheftHalt).
+		mapping.ClearTheftHalt()
+
+	case "setCustodyCheck":
+		// C2: the custody check's switch (THORChain StopSolvencyCheck), {"on":bool}.
+		// Off lifts a custody halt at once, so it is immediate like unpause.
+		var p struct {
+			On *bool `json:"on"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil || p.On == nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setCustodyCheck: payload {on: bool}"))
+		}
+		mapping.SetCustodyCheck(*p.On)
+
 	case "pause":
 		sdk.StateSetObject(constants.PausedKey, "1")
 
