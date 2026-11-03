@@ -455,6 +455,34 @@ func proveCustody(input *string) *string {
 	return &out
 }
 
+// proveTokenRoot / proveTokenCustody (C2 for tokens): anyone proves a
+// registered token's storage root at a stored header, then each fund-holding
+// generation's balance against it; the complete set compared with the token's
+// booked custody sets or clears that token's short flag and "si". Not
+// pause-gated.
+//
+//go:wasmexport proveTokenRoot
+func proveTokenRoot(input *string) *string {
+	var params mapping.ProveTokenRootParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveTokenRoot(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
+//go:wasmexport proveTokenCustody
+func proveTokenCustody(input *string) *string {
+	var params mapping.ProveTokenCustodyParams
+	unmarshalParams(input, &params)
+	out, err := mapping.HandleProveTokenCustody(&params)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 //go:wasmexport unmapERC20
 func unmapERC20(input *string) *string {
 	var params mapping.TransferParams
@@ -1079,6 +1107,17 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setMaxWithdrawPerBlock: unknown asset "+p.Asset))
 		}
 		mapping.SetMaxWithdrawPerBlock(p.Asset, v)
+
+	case "setTokenCustody":
+		// C2 for tokens: where a registered token keeps a holder's balance
+		// {asset, slot, bits, gap} (USDC v2.2: slot 9, bits 255).
+		var p mapping.SetTokenCustodyParams
+		if err := json.Unmarshal(payload, &p); err != nil {
+			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "setTokenCustody: payload {asset, slot, bits, gap}"))
+		}
+		if err := mapping.SetTokenCustody(&p); err != nil {
+			ce.CustomAbort(err)
+		}
 
 	// Emergency (Immediate, 0 blocks)
 	case "clearTheftHalt":

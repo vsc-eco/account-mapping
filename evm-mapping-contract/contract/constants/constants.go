@@ -410,6 +410,21 @@ const (
 	CustodyCheckOffKey      = "sio"
 )
 
+// Per-asset custody (C2 for ERC-20s, token_custody.go):
+//   - AssetShortPrefix+{asset}: the block height of the newest complete proof
+//     that found that asset short ("eth" included). "si" is set with the first
+//     short asset and deleted only when no asset is short, so one asset's
+//     proof never lifts another's halt.
+//   - TokenCustodyConfigPrefix+{symbol}: where the token keeps a holder's
+//     balance, "{slot}|{bits}|{gap}" (owner, setTokenCustody).
+//   - TokenCustodyProofPrefix+{symbol}: the token proof being assembled,
+//     "{height}|{storage root hex}|{gen}:{amount},...".
+const (
+	AssetShortPrefix         = "sis" + DirPathDelimiter
+	TokenCustodyConfigPrefix = "tcc" + DirPathDelimiter
+	TokenCustodyProofPrefix  = "tcp" + DirPathDelimiter
+)
+
 // DefaultCustodyGapWei: a shortfall up to this much is not a halt. Booked
 // custody is debited for gas at the estimate before the L1 tx mines and may
 // briefly lag only by the gas of in-flight sweeps (about 216,000 gas for an

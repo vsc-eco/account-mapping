@@ -36,7 +36,7 @@ import (
 // generation has one at the same header. A proof at an older header than the
 // one being assembled is refused, so nobody can keep discarding another
 // prover's progress. Permissionless and not pause-gated (a shortfall during a
-// pause must still halt). ETH only: token custody needs storage proofs.
+// pause must still halt). Tokens: token_custody.go (storage proofs).
 
 // ProveCustodyParams: one generation's account proof.
 type ProveCustodyParams struct {
@@ -163,26 +163,12 @@ func HandleProveCustody(p *ProveCustodyParams) (string, error) {
 		held.Add(held, b)
 	}
 	sdk.StateDeleteObject(constants.CustodyProofKey)
-	book := GetSupply(constants.NativeAsset).Active
 	gap, _ := new(big.Int).SetString(constants.DefaultCustodyGapWei, 10)
-	short := new(big.Int).Sub(book, held)
-	hs := strconv.FormatUint(h, 10)
-	if short.Cmp(gap) > 0 {
-		if !SolvencyHalted() {
-			sdk.StateSetObject(constants.SolvencyHaltKey, hs)
-		}
-		sdk.Log("security|evm-custody-short|h=" + hs + "|held=" + held.String() + "|book=" + book.String())
-		return "custody short at block " + hs + ": held " + held.String() + " < booked " + book.String(), nil
-	}
-	if SolvencyHalted() {
-		sdk.StateDeleteObject(constants.SolvencyHaltKey)
-		sdk.Log("custody|solvent|h=" + hs + "|held=" + held.String() + "|book=" + book.String())
-	}
-	return "custody held at block " + hs + ": " + held.String() + " for booked " + book.String(), nil
+	return custodyVerdict(constants.NativeAsset, h, held, GetSupply(constants.NativeAsset).Active, gap), nil
 }
 
-// SetCustodyCheck is the owner's switch: off refuses custody proofs and lifts
-// any custody halt; on resumes.
+// SetCustodyCheck is the owner's switch: off refuses custody proofs (ETH and
+// tokens) and lifts every custody halt; on resumes.
 func SetCustodyCheck(on bool) {
 	if on {
 		sdk.StateDeleteObject(constants.CustodyCheckOffKey)
@@ -191,4 +177,8 @@ func SetCustodyCheck(on bool) {
 	sdk.StateSetObject(constants.CustodyCheckOffKey, "1")
 	sdk.StateDeleteObject(constants.SolvencyHaltKey)
 	sdk.StateDeleteObject(constants.CustodyProofKey)
+	for _, a := range vaultAssets() {
+		sdk.StateDeleteObject(constants.AssetShortPrefix + a)
+		sdk.StateDeleteObject(constants.TokenCustodyProofPrefix + a)
+	}
 }
