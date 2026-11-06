@@ -300,6 +300,10 @@ const (
 
 	// VaultAddrCachePrefix caches a generation's L1 address: vac-{gen} → "<pubkey hex>|<0x address>".
 	VaultAddrCachePrefix = "vac" + DirPathDelimiter
+	// DepositContractAttestedPrefix: dca-{gen} -> the L1 height at which the
+	// generation's MagiDeposit was proven to have code (I-28; depositAddress
+	// names a generation's MagiDeposit only once it is set).
+	DepositContractAttestedPrefix = "dca" + DirPathDelimiter
 
 	// VaultBookPrefix is what a SUPERSEDED generation's address holds, per asset:
 	// vb-{gen}-{asset} → wei / token units. The active generation's share is
@@ -326,6 +330,21 @@ func VaultPurgeGraceL1Blocks(chainId uint64) uint32 {
 // VaultPurgeReorgL1Blocks is the margin a generation stays empty after its last
 // emptying before a purge (BTC PURGE-GRIEF-1).
 const VaultPurgeReorgL1Blocks uint32 = 64
+
+// VaultPurgeMapWindowL1Blocks (I-26, testnet 11-04) is how far past the grace
+// the stored L1 height must be before a purge, so a deposit mined inside the
+// grace has its header stored and its map in before the generation stops
+// matching: a map needs the deposit's header, which comes with a later proof
+// (finality ~13 min, a proof cycle, the attestation). Live: the proof that let
+// a parked deposit's header be attested also crossed the grace, the purge went
+// out first and 0.02 ETH was stranded. About a day on mainnet; on testnets one
+// more reorg margin, so a rotation still runs end to end.
+func VaultPurgeMapWindowL1Blocks(chainId uint64) uint32 {
+	if chainId == 1 {
+		return 7_200
+	}
+	return VaultPurgeReorgL1Blocks
+}
 
 // TokenSymbolsKey lists every registered token symbol, '|'-joined, so a vault
 // rotation can book each asset a retiring generation holds (A01).

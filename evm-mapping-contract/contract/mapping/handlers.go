@@ -249,6 +249,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
+	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+		return "", err
+	}
 	if err := checkRefundTo(caller, params.RefundTo); err != nil {
 		return "", err
 	}
@@ -443,6 +446,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	// review2 #44: refuse the zero address (TSS-signed burn).
 	if recipientAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
+	}
+	if err := refuseVaultDestination(recipientAddr, vaultAddress); err != nil {
+		return "", err
 	}
 	// MED-83: the caller's cap on the reserve-paid gas, checked at issue.
 	maxFee, err := optionalMaxFee(params.MaxFee)
@@ -1373,6 +1379,9 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 	// review2 #44: refuse the zero address (TSS-signed burn).
 	if toAddr == ([20]byte{}) {
 		return ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
+	}
+	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+		return err
 	}
 
 	q := QueuedWithdrawal{From: params.From, To: params.To, Amount: amount}

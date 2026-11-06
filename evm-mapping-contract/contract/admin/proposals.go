@@ -70,7 +70,10 @@ const (
 // Action class enumeration (string actions are matched against this set).
 //
 // Per W4 §D-C-8 17-handler migration table:
-//   Fund-affecting (Long, 400K):     setVerifierContract, createKey
+//   Long (400K):                     setVerifierContract (fund-affecting), createKey
+//                                    (I-14: createKey mints a pending key and moves no funds; the owner's
+//                                    direct createKey export is immediate, as BTC's owner-only createKey;
+//                                    this timelocked route is the optional slow path)
 //   Operator-tactical (28.8K, 24h):  replaceWithdrawal, clearNonce
 //   (setVault and registerPublicKey were removed by A18: the vault is the TSS
 //   primary key's address.)

@@ -296,8 +296,18 @@ func TestA01_FullMigration(t *testing.T) {
 		t.Fatalf("purged before the grace: %q", out)
 	}
 	w.advance(uint64(constants.VaultPurgeReorgL1Blocks))
+	// I-26: the grace alone is not enough; a deposit mined at its end still
+	// needs its header stored and its map in
+	if out, _ := ReconcileRetiringVaults(11155111); out != "retire: no generation transitions" {
+		t.Fatalf("purged at the end of the grace, before the map window: %q", out)
+	}
+	w.advance(uint64(constants.VaultPurgeMapWindowL1Blocks(11155111)) - 1)
+	if out, _ := ReconcileRetiringVaults(11155111); out != "retire: no generation transitions" {
+		t.Fatalf("purged one block before the map window ends: %q", out)
+	}
+	w.advance(1)
 	if out, _ := ReconcileRetiringVaults(11155111); !strings.Contains(out, "purged=0") {
-		t.Fatalf("not purged after the grace: %q", out)
+		t.Fatalf("not purged after the grace and the map window: %q", out)
 	}
 	if gens := FundHoldingGens(); len(gens) != 1 || gens[0].Generation != 1 {
 		t.Fatalf("fund-holding after the purge: %+v", gens)

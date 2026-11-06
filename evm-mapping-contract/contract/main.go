@@ -604,15 +604,32 @@ func decreaseAllowance(input *string) *string {
 	return nil
 }
 
-// depositAddress returns the vault's MagiDeposit address (RP-7, EIP-55), where
-// a deposit for an explicit Magi recipient is made; "" while there is no vault.
+// depositAddress returns the active vault's MagiDeposit address (RP-7,
+// EIP-55), where a deposit for an explicit Magi recipient is made; "" while
+// there is no vault or its MagiDeposit's code has not been attested (I-28:
+// ETH sent to the address before the contract exists is lost for good).
 //
 //go:wasmexport depositAddress
 func depositAddress(_ *string) *string {
-	v, ok := mapping.TssVaultAddress()
 	out := ""
-	if ok {
-		out = crypto.ChecksumHex(mapping.DepositContractAddress(v))
+	if dc, ok := mapping.ActiveDepositAddress(); ok {
+		out = crypto.ChecksumHex(dc)
+	}
+	return &out
+}
+
+// attestDepositContract records that a generation's MagiDeposit has code on
+// L1 (I-28), from an account proof of its CREATE2 address at a stored header:
+// {"gen":N,"block_height":H,"account_proof":"<base64 nodes>"}. Permissionless
+// (it records only what the proof shows); a second call is a no-op.
+//
+//go:wasmexport attestDepositContract
+func attestDepositContract(input *string) *string {
+	var p mapping.AttestDepositContractParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleAttestDepositContract(&p)
+	if err != nil {
+		ce.CustomAbort(err)
 	}
 	return &out
 }
@@ -1038,6 +1055,19 @@ func dispatchAdmin(action string, payload []byte) {
 		// rather than fail loud.
 		if len(payload) == 0 {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerRouter: empty router id"))
+		}
+		// PS-4 (decided 11-05, BTC VR2-20 parity, btc-mapping main.go
+		// RegisterRouter): set-once on every network. The router is granted an
+		// allowance over each swap-routed deposit's credit (handlers.go
+		// routeDeposit), so re-pointing it hands a live spend authority over
+		// real deposits to another contract. A change needs a contract update.
+		// The same id again is a no-op; another id fails loudly, so a timelocked
+		// proposal cannot look executed while it changed nothing.
+		if cur := sdk.StateGetObject(constants.RouterContractIdKey); cur != nil && *cur != "" {
+			if *cur != string(payload) {
+				ce.CustomAbort(ce.NewContractError(ce.ErrIntent, "registerRouter: the router is set once ("+*cur+"); a change needs a contract update"))
+			}
+			break
 		}
 		sdk.StateSetObject(constants.RouterContractIdKey, string(payload))
 

@@ -41,6 +41,39 @@ func (t *depositTargetSet) ownAddress(a [20]byte) bool {
 	return t.find(a) != nil
 }
 
+// errVaultDestination refuses a withdrawal paid to one of the vault's own
+// addresses (I-15, testnet 11-04): the payout would land in the vault and is
+// never credited back (a map from a vault address is errOwnTransfer), so the
+// user loses it. The BTC contract refuses a payout to its change address for
+// the same reason ("self-harm, no theft, but cheap to reject outright").
+var errVaultDestination = ce.NewContractError(ce.ErrInput, "refusing withdrawal to one of the vault's own addresses: the payout would stay in the vault and never be credited back")
+
+// refuseVaultDestination is errVaultDestination when to is a fund-holding
+// generation's address: the active vault (the handler's vault, already
+// derived) or a superseded one still holding funds. Only the superseded
+// generations' addresses are derived here, so outside a rotation the check
+// costs one registry read (a first version derived every generation through
+// FundHoldingGens: +114 RC on every unmap).
+func refuseVaultDestination(to, vault [20]byte) error {
+	if vault != ([20]byte{}) && to == vault {
+		return errVaultDestination
+	}
+	vaults, _, _, err := LoadVaultState()
+	if err != nil {
+		return nil // the withdrawal's own vault reads fail it further on
+	}
+	for i := range vaults {
+		v := vaults[i]
+		if v.Status == VaultStatusActive || !isFundHoldingStatus(v.Status) {
+			continue
+		}
+		if addr, ok := GenAddress(&v); ok && addr == to {
+			return errVaultDestination
+		}
+	}
+	return nil
+}
+
 // errOwnTransfer refuses a "deposit" sent by the vault itself.
 var errOwnTransfer = ce.NewContractError(ce.ErrInput, "the sender is one of the vault's own addresses: a sweep or a withdrawal to the vault, not a deposit")
 
