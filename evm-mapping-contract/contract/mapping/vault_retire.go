@@ -15,7 +15,7 @@ import (
 //
 //	Retiring|Draining, nothing booked, no sweep open -> Inactive (grace anchor)
 //	Inactive, funded again (a late deposit)           -> Draining
-//	Inactive, empty, grace elapsed                    -> Purged
+//	Inactive, empty, grace + map window elapsed       -> Purged (I-26)
 //
 // A generation is never purged while anything is booked to it: a late deposit
 // to an Inactive address is credited and booked, the next reconcile returns it
@@ -50,7 +50,7 @@ func ReconcileRetiringVaults(chainId uint64) (string, error) {
 			if genFunded(v.Generation) {
 				v.Status = VaultStatusDraining
 				toDraining = append(toDraining, g)
-			} else if v.InactiveHeight != 0 && height >= v.InactiveHeight && height-v.InactiveHeight >= grace {
+			} else if v.InactiveHeight != 0 && height >= v.InactiveHeight && height-v.InactiveHeight >= grace+constants.VaultPurgeMapWindowL1Blocks(chainId) {
 				v.Status = VaultStatusPurged
 				toPurged = append(toPurged, g)
 			}

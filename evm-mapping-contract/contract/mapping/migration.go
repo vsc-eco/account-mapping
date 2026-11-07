@@ -68,6 +68,14 @@ type SweepRecord struct {
 	Booked   string         `json:"booked,omitempty"`
 	BuiltL1  uint64         `json:"built_l1"`
 	Versions []SweepVersion `json:"versions"`
+	// FirstBuiltL1 is the L1 height of the sweep's first build, the floor for
+	// its confirmation (I-31, devnet 11-05). BuiltL1 moves with every re-drive
+	// (it times the next one), but any version can mine from the first build
+	// on: with BuiltL1 as the floor, a version that mined before a re-drive
+	// (the bot re-drove it while its receipt was unreadable) could never be
+	// confirmed, every later version was "nonce too low", and the rotation was
+	// stuck for good. 0 on a record written before the field: BuiltL1 is used.
+	FirstBuiltL1 uint64 `json:"first_built_l1,omitempty"`
 }
 
 const (
@@ -77,6 +85,12 @@ const (
 	// SweepRedriveL1Blocks is how long a sweep version stays out before it may be
 	// re-driven at a higher fee.
 	SweepRedriveL1Blocks = uint64(32)
+	// MaxSweepVersions caps a sweep's re-drives (PS-1, the BTC contract's
+	// MaxSpendGroupMembers 64, "cold-scan B"): each version raises the fee 10%
+	// and books its extra gas from the reserve though only one can mine, so a
+	// sweep stuck for another reason (its signature, a nonce gap) must not be
+	// re-driven forever. Past it the owner resolves the sweep by hand.
+	MaxSweepVersions = 64
 	// MaxSweepReverts is how many reverted transfers of one token a generation
 	// takes before migration stops trying it (an owner write-off is then due).
 	MaxSweepReverts = 2
@@ -282,6 +296,9 @@ func HandleMigrateVault(chainId uint64, ethProof *AccountProof) (string, error) 
 	if hasOpenSweep(gen) {
 		return "sweep in flight for generation " + strconv.FormatUint(uint64(gen), 10), nil
 	}
+	if err := requireSweepKey(gen); err != nil {
+		return "", err
+	}
 	successorAddr, ok := GenAddress(successor)
 	if !ok {
 		return "", ce.NewContractError(ce.ErrTransaction, "the active generation has no address")
@@ -485,9 +502,10 @@ func buildETHSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte,
 	r := &SweepRecord{
 		Gen: gen, Nonce: nonce, Kind: sweepKindETH, Asset: constants.NativeAsset,
 		To: crypto.AddressToHex(successor), Gas: e.gas, GasCost: e.cost.String(),
-		Booked:   booked.String(),
-		BuiltL1:  blocklist.GetLastHeight(),
-		Versions: []SweepVersion{{Value: e.value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: e.feeCap}},
+		Booked:       booked.String(),
+		BuiltL1:      blocklist.GetLastHeight(),
+		FirstBuiltL1: blocklist.GetLastHeight(),
+		Versions:     []SweepVersion{{Value: e.value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: e.feeCap}},
 	}
 	putSweep(r)
 	sdk.StateSetObject(constants.ETHSweptPrefix+strconv.FormatUint(uint64(gen), 10), "1")
@@ -508,8 +526,9 @@ func buildTokenSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byt
 	r := &SweepRecord{
 		Gen: gen, Nonce: nonce, Kind: sweepKindToken, Asset: t.sym, Token: crypto.AddressToHex(t.token),
 		Amount: t.amount.String(), To: crypto.AddressToHex(successor), Gas: t.gas, GasCost: t.cost.String(),
-		BuiltL1:  blocklist.GetLastHeight(),
-		Versions: []SweepVersion{{Value: "0", Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: t.feeCap}},
+		BuiltL1:      blocklist.GetLastHeight(),
+		FirstBuiltL1: blocklist.GetLastHeight(),
+		Versions:     []SweepVersion{{Value: "0", Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: t.feeCap}},
 	}
 	putSweep(r)
 	sdk.TssSignKey(VaultKeyName(gen), ComputeSighash(unsigned))
@@ -607,7 +626,11 @@ func HandleConfirmSweep(req *ConfirmSweepRequest, chainId uint64) error {
 	if r == nil {
 		return ce.NewContractError(ce.ErrIntent, "no open sweep "+sweepKey(req.Gen, req.Nonce))
 	}
-	if req.BlockHeight <= r.BuiltL1 {
+	floor := r.FirstBuiltL1
+	if floor == 0 {
+		floor = r.BuiltL1
+	}
+	if req.BlockHeight <= floor {
 		return ce.NewContractError(ce.ErrIntent, "confirmation block must be after the sweep was built")
 	}
 	header := blocklist.GetHeader(req.BlockHeight)
@@ -730,10 +753,28 @@ func hexBytes(s string) []byte {
 // HandleRedriveSweep re-signs a stuck sweep at the same nonce with a fee at
 // least 10% higher (EIP-1559 replacement) after SweepRedriveL1Blocks. The extra
 // gas is booked from the reserve; an ETH sweep sends that much less.
+// requireSweepKey refuses to build or re-drive a sweep the retiring
+// generation's key cannot sign (PS-3, BTC BRK-2 assertInputsSignable parity):
+// the host never signs for a deprecated or deleted key, so the sweep would sit
+// unsigned with its gas booked and the generation's later nonces behind it.
+func requireSweepKey(gen uint32) error {
+	if err := requireKeyActive(VaultKeyName(gen)); err != nil {
+		return ce.Prepend(err, "the retiring generation "+strconv.FormatUint(uint64(gen), 10)+"'s key cannot sign a sweep (renewKey it first)")
+	}
+	return nil
+}
+
 func HandleRedriveSweep(gen uint32, nonce uint64, chainId uint64) (string, error) {
+	if err := requireSweepKey(gen); err != nil {
+		return "", err
+	}
 	r := GetSweep(gen, nonce)
 	if r == nil {
 		return "", ce.NewContractError(ce.ErrIntent, "no open sweep "+sweepKey(gen, nonce))
+	}
+	if len(r.Versions) >= MaxSweepVersions {
+		return "", ce.NewContractError(ce.ErrIntent, "sweep "+sweepKey(gen, nonce)+" has reached the re-drive cap of "+
+			strconv.Itoa(MaxSweepVersions)+" versions: it is not stuck on its fee")
 	}
 	l1 := blocklist.GetLastHeight()
 	if l1 < r.BuiltL1+SweepRedriveL1Blocks {
@@ -773,6 +814,12 @@ func HandleRedriveSweep(gen uint32, nonce uint64, chainId uint64) (string, error
 		value.Sub(value, extra)
 		if value.Sign() <= 0 {
 			return "", ce.NewContractError(ce.ErrIntent, "the higher fee would take the whole ETH sweep")
+		}
+		// PS-1 (BTC cold-scan C / V5-4): a re-drive may not spend more than
+		// half of what the sweep moves on gas (a runaway bump).
+		moved := new(big.Int).Add(value, new(big.Int).Mul(new(big.Int).SetUint64(r.Gas), new(big.Int).SetUint64(feeCap)))
+		if fee := new(big.Int).Mul(new(big.Int).SetUint64(r.Gas), new(big.Int).SetUint64(feeCap)); new(big.Int).Mul(fee, big.NewInt(2)).Cmp(moved) > 0 {
+			return "", ce.NewContractError(ce.ErrIntent, "the re-drive's gas would be more than half of the ETH sweep")
 		}
 		unsigned = BuildETHWithdrawalTxGas(chainId, nonce, tip, feeCap, to, value, r.Gas)
 	}
