@@ -201,13 +201,28 @@ func renewVaultKeys() string {
 
 // checkOperator admits the owner or the appointed vault operator: the
 // operational rotation ops an off-chain driver (the bot) calls. Mirrors the BTC
-// contract.
+// contract's checkOperator, including its 18p fix.
 func checkOperator() {
-	caller := sdk.GetEnv().Caller.String()
+	env := sdk.GetEnv()
+	caller := env.Caller.String()
 	if owner := sdk.GetEnvKey("contract.owner"); owner != nil && caller == *owner {
+		// 18p (BTC contract, 11-08): a posting-only signature also makes the
+		// owner the Caller, so without this a posting key alone could drive
+		// migrateVault, redriveSweep, retireVault and writeOffDust. checkOwner
+		// already requires active authority on the same owner branch.
+		requireOwnerActive(env)
 		return
 	}
 	if op := sdk.StateGetObject(constants.VaultOperatorKey); op != nil && *op != "" && caller == *op {
+		// The operator is usually a did:pkh identity (the bot), which has no
+		// posting variant and never appears in a Hive tx's required_auths, so
+		// requiring active authority unconditionally would break the operator
+		// path. setVaultOperator also accepts a hive: account, and that one has
+		// the same posting-key gap as the owner, so the check applies to hive:
+		// operators only (as in the BTC contract).
+		if strings.HasPrefix(*op, "hive:") && !slices.Contains(env.Sender.RequiredAuths, env.Caller) {
+			ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "vault operator action requires active authority (posting authority cannot authorize it)"))
+		}
 		return
 	}
 	ce.CustomAbort(ce.NewContractError(ce.ErrNoPermission, "action must be performed by the contract owner or the vault operator"))
