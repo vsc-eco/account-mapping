@@ -3,6 +3,7 @@ package mapping
 import (
 	"math/big"
 
+	"evm-mapping-contract/contract/constants"
 	ce "evm-mapping-contract/contract/contracterrors"
 )
 
@@ -31,14 +32,35 @@ func newDepositTargets(vault [20]byte) *depositTargetSet {
 }
 
 // ownAddress reports whether a is one of the vault's own addresses: a
-// fund-holding generation's, or the single vault a contract with no registry
-// uses. Those are the only vault addresses that can send (a pending generation
-// holds nothing, a purged one is empty). A transfer from one of them is the
-// vault moving its own funds (a migration sweep, or a withdrawal paid to a
-// vault address), never a deposit: crediting it would mint the moved amount a
-// second time.
+// fund-holding generation's, a purged generation's, or the single vault a
+// contract with no registry uses. A transfer from one of them is the vault
+// moving its own funds (a migration sweep, or a withdrawal paid to a vault
+// address), never a deposit: crediting it would mint the moved amount a
+// second time. A pending generation has sent nothing.
 func (t *depositTargetSet) ownAddress(a [20]byte) bool {
-	return t.find(a) != nil
+	return t.find(a) != nil || isPurgedGenAddress(a)
+}
+
+// isPurgedGenAddress reports whether a is a purged generation's address
+// (SWEEP-REMAP-1). A purged generation is empty and no longer a deposit target,
+// but the sweeps it sent before the purge stay provable for as long as the
+// verifier keeps their headers: without this check each of them maps as a new
+// deposit to the successor and mints the swept amount again. The registry read
+// is memoized, and a purged generation's address is cached.
+func isPurgedGenAddress(a [20]byte) bool {
+	vaults, _, _, err := LoadVaultState()
+	if err != nil {
+		return false // unreadable registry: as before, only the handler's vault applies
+	}
+	for i := range vaults {
+		if vaults[i].Status != VaultStatusPurged {
+			continue
+		}
+		if addr, ok := GenAddress(&vaults[i]); ok && addr == a {
+			return true
+		}
+	}
+	return false
 }
 
 // errVaultDestination refuses a withdrawal paid to one of the vault's own
@@ -113,6 +135,16 @@ func (t *depositTargetSet) book(asset string, amount *big.Int) {
 	g := t.find(t.matched)
 	if g == nil || !isSupersededStatus(g.Status) || amount.Sign() <= 0 {
 		return
+	}
+	// STALE-BOOK-1: an ETH sweep sends the balance proven at its proof block, so
+	// an ETH deposit mined at or before that block already went with it to the
+	// active generation (whose share is derived). Booking it here leaves a book
+	// the address never holds: the generation never empties and NN#3 refuses
+	// every later rotation. Tokens are swept by book, so they stay booked.
+	if asset == constants.NativeAsset {
+		if proofBlock, swept := ethSweptProofBlock(g.Generation); swept && t.l1 <= proofBlock {
+			return
+		}
 	}
 	addVaultBook(g.Generation, asset, amount)
 	noteBookedHeight(g.Generation, t.l1)

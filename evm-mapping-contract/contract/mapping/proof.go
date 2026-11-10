@@ -51,27 +51,44 @@ func VerifyETHDeposit(
 		return sender, nil, nil, txHash, ErrBlockNotFound
 	}
 
-	rawBytes, err := hex.DecodeString(req.RawHex)
-	if err != nil {
-		return sender, nil, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
-	}
-
-	proofBytes, err := hex.DecodeString(req.MerkleProofHex)
-	if err != nil {
-		return sender, nil, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
-	}
-
-	proof := splitProofNodes(proofBytes)
 	key := mpt.RLPEncodeKey(req.TxIndex)
 
-	value, err := mpt.VerifyProof(header.TransactionsRoot, key, proof)
-	if err != nil {
-		return sender, nil, nil, txHash, ErrProofFailed
-	}
-
-	// Verify the proven value matches the raw TX
-	if !bytesEqual(value, rawBytes) {
-		return sender, nil, nil, txHash, ErrProofFailed
+	// ETH-PAYLOAD-1: the tx proof may come base64 with the tx as its leaf
+	// (tx_proof, as confirmSweep's), or hex with the tx sent again (raw_hex +
+	// merkle_proof_hex). The hex form carries the tx four times over, so under
+	// the 8,192-byte cap a deposit tx above ~600 bytes in a busy block could
+	// never be mapped and its ETH stayed in the vault uncredited. Both prove the
+	// same leaf and give the same tx hash and observed key, so one cannot map a
+	// deposit the other did.
+	var rawBytes []byte
+	if req.TxProof != "" {
+		proofBytes, err := base64.StdEncoding.DecodeString(req.TxProof)
+		if err != nil || len(proofBytes) == 0 {
+			return sender, nil, nil, txHash, ce.NewContractError(ce.ErrInput, "tx_proof must be base64 (concatenated tx-trie MPT nodes)")
+		}
+		value, err := mpt.VerifyProof(header.TransactionsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, nil, txHash, ErrProofFailed
+		}
+		rawBytes = value
+	} else {
+		raw, err := hex.DecodeString(req.RawHex)
+		if err != nil {
+			return sender, nil, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "raw_hex")
+		}
+		proofBytes, err := hex.DecodeString(req.MerkleProofHex)
+		if err != nil {
+			return sender, nil, nil, txHash, ce.WrapContractError(ce.ErrInvalidHex, err, "merkle_proof_hex")
+		}
+		value, err := mpt.VerifyProof(header.TransactionsRoot, key, splitProofNodes(proofBytes))
+		if err != nil {
+			return sender, nil, nil, txHash, ErrProofFailed
+		}
+		// Verify the proven value matches the raw TX
+		if !bytesEqual(value, raw) {
+			return sender, nil, nil, txHash, ErrProofFailed
+		}
+		rawBytes = raw
 	}
 
 	// Compute TX hash for observed tracking

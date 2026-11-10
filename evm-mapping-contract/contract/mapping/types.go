@@ -22,6 +22,10 @@ type VerificationRequest struct {
 	// merkle_proof_hex (ERC20-PAYLOAD-1): base64 of the concatenated
 	// receipt-trie MPT nodes; the leaf is the receipt (not sent on its own, EVM-T1).
 	ReceiptProof string `json:"receipt_proof,omitempty"`
+	// deposit_type "eth", in place of raw_hex + merkle_proof_hex (ETH-PAYLOAD-1):
+	// base64 of the concatenated tx-trie MPT nodes; the leaf is the raw tx (not
+	// sent on its own), as confirmSweep's tx_proof.
+	TxProof string `json:"tx_proof,omitempty"`
 }
 
 type TransferParams struct {

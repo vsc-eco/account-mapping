@@ -452,6 +452,9 @@ type ethSweepPlan struct {
 	gas    uint64
 	feeCap uint64
 	cost   *big.Int
+	// proofBlock is the L1 block of the balance proof: every ETH deposit mined
+	// at or before it is in value.
+	proofBlock uint64
 }
 
 // planETHSweep proves the retiring address's balance at the generation's next
@@ -481,7 +484,21 @@ func planETHSweep(gen uint32, from [20]byte, p *AccountProof, keep *big.Int, hea
 	if value.Sign() <= 0 {
 		return nil, balance, nil
 	}
-	return &ethSweepPlan{value: value, keep: keep, gas: gas, feeCap: feeCap, cost: cost}, balance, nil
+	return &ethSweepPlan{value: value, keep: keep, gas: gas, feeCap: feeCap, cost: cost, proofBlock: p.BlockHeight}, balance, nil
+}
+
+// ethSweptProofBlock is the L1 block whose proven balance the generation's
+// latest ETH sweep sends (vse-{gen}); swept is false until an ETH sweep is
+// built. A marker written before the block was recorded holds "1".
+func ethSweptProofBlock(gen uint32) (block uint64, swept bool) {
+	s := sdk.StateGetObject(constants.ETHSweptPrefix + strconv.FormatUint(uint64(gen), 10))
+	if s == nil {
+		return 0, false
+	}
+	if n, err := strconv.ParseUint(*s, 10, 64); err == nil && n > 0 {
+		return n, true
+	}
+	return 1, true
 }
 
 func buildETHSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte, e *ethSweepPlan) string {
@@ -508,7 +525,13 @@ func buildETHSweep(chainId uint64, gen uint32, nonce uint64, successor [20]byte,
 		Versions:     []SweepVersion{{Value: e.value.String(), Unsigned: hex.EncodeToString(unsigned), TipCap: sweepTipCap, FeeCap: e.feeCap}},
 	}
 	putSweep(r)
-	sdk.StateSetObject(constants.ETHSweptPrefix+strconv.FormatUint(uint64(gen), 10), "1")
+	// STALE-BOOK-1: keep the proof block, so a deposit it already carried is not
+	// booked to this generation when it is mapped later (depositTargetSet.book).
+	proofBlock := e.proofBlock
+	if prev, swept := ethSweptProofBlock(gen); swept && prev > proofBlock {
+		proofBlock = prev
+	}
+	sdk.StateSetObject(constants.ETHSweptPrefix+strconv.FormatUint(uint64(gen), 10), strconv.FormatUint(proofBlock, 10))
 	sdk.TssSignKey(VaultKeyName(gen), ComputeSighash(unsigned))
 	sdk.Log("sweep|g=" + strconv.FormatUint(uint64(gen), 10) + "|n=" + strconv.FormatUint(nonce, 10) + "|a=eth|v=" + e.value.String() + "|to=" + r.To)
 	return "sweep " + sweepKey(gen, nonce) + " eth " + e.value.String()
@@ -720,6 +743,7 @@ func HandleConfirmSweep(req *ConfirmSweepRequest, chainId uint64) error {
 			booked, _ := new(big.Int).SetString(r.Booked, 10)
 			addVaultBook(r.Gen, constants.NativeAsset, new(big.Int).Neg(minBig(booked, VaultBook(r.Gen, constants.NativeAsset))))
 		}
+		bookSweepAtDestination(r, mined.Value, req.BlockHeight)
 		sdk.Log("sweepok|g=" + strconv.FormatUint(uint64(r.Gen), 10) + "|n=" + strconv.FormatUint(r.Nonce, 10) + "|a=" + r.Asset + "|v=" + mined.Value)
 	} else {
 		if r.Kind == sweepKindToken {
@@ -729,6 +753,31 @@ func HandleConfirmSweep(req *ConfirmSweepRequest, chainId uint64) error {
 	}
 	closeSweep(r)
 	return nil
+}
+
+// bookSweepAtDestination (SWEEP-INFLIGHT-PURGE): a sweep pays the generation that
+// was active when it was built, whose share is derived, so nothing is booked where
+// it lands. If a later rotation superseded that generation before the sweep mined,
+// the amount reached an address that booked nothing for it: the generation emptied,
+// purged, and the amount was stranded there. It is booked as a deposit to that
+// address in the mined block, by the same rule (only a superseded generation; not
+// ETH that generation's own sweep already carried on). minedValue is the ETH the
+// mined version sent; a token sweep moves its record's Amount.
+func bookSweepAtDestination(r *SweepRecord, minedValue string, minedBlock uint64) {
+	to, err := crypto.HexToAddress(r.To)
+	if err != nil {
+		return
+	}
+	received := new(big.Int)
+	if r.Kind == sweepKindToken {
+		received.SetString(r.Amount, 10)
+	} else {
+		received.SetString(minedValue, 10)
+	}
+	if dest := newDepositTargets([20]byte{}); dest.isVault(to) {
+		dest.l1 = minedBlock
+		dest.book(r.Asset, received)
+	}
 }
 
 func receiptHasTransfer(logs []ParsedLog, token, from, to [20]byte, amt *big.Int) bool {

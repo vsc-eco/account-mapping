@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"encoding/json"
 	"math/big"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"evm-mapping-contract/contract/blocklist"
 	"evm-mapping-contract/contract/constants"
 	ce "evm-mapping-contract/contract/contracterrors"
+	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/sdk"
 )
 
@@ -50,7 +52,8 @@ func ReconcileRetiringVaults(chainId uint64) (string, error) {
 			if genFunded(v.Generation) {
 				v.Status = VaultStatusDraining
 				toDraining = append(toDraining, g)
-			} else if v.InactiveHeight != 0 && height >= v.InactiveHeight && height-v.InactiveHeight >= grace+constants.VaultPurgeMapWindowL1Blocks(chainId) {
+			} else if v.InactiveHeight != 0 && height >= v.InactiveHeight && height-v.InactiveHeight >= grace+constants.VaultPurgeMapWindowL1Blocks(chainId) &&
+				!openSweepPays(v) { // SWEEP-INFLIGHT-PURGE: an older sweep to it is still open
 				v.Status = VaultStatusPurged
 				toPurged = append(toPurged, g)
 			}
@@ -71,6 +74,30 @@ func ReconcileRetiringVaults(chainId uint64) (string, error) {
 		out += " purged=" + strings.Join(toPurged, ",")
 	}
 	return out, nil
+}
+
+// openSweepPays reports whether an open sweep pays generation v's address: an
+// older generation's sweep built while v was active. Until it settles, v must not
+// purge; once it does, confirmSweep books what it brought to v and v drains again.
+func openSweepPays(v *Vault) bool {
+	addr, ok := GenAddress(v)
+	if !ok {
+		return false
+	}
+	for _, k := range openSweeps() {
+		s := sdk.StateGetObject(constants.MigrationSweepPrefix + k)
+		if s == nil || *s == "" {
+			continue
+		}
+		var r SweepRecord
+		if json.Unmarshal([]byte(*s), &r) != nil {
+			continue
+		}
+		if to, err := crypto.HexToAddress(r.To); err == nil && to == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // inactiveAnchor is the purge-grace anchor of an emptying at height (BTC
@@ -134,6 +161,24 @@ func HandleWriteOffDust() (string, error) {
 		return "wrote off " + dust.String() + " wei of generation " + g, nil
 	}
 	return "no dust to write off", nil
+}
+
+// HandleRetryTokenSweep lets migration try again a token whose transfers from a
+// superseded generation reverted MaxSweepReverts times (D-2), once whatever made
+// them revert is gone (a token pause, a gas limit raised since). Until then the
+// generation stays funded, so no rotation can follow (NN#3), and the only other
+// way out is HandleWriteOffToken, which books a loss for tokens that are still at
+// the old address. The next migrateVault sweeps the token again. Owner only.
+func HandleRetryTokenSweep(gen uint32, symbol string) (string, error) {
+	if sweepReverts(gen, symbol) < MaxSweepReverts {
+		return "", ce.NewContractError(ce.ErrIntent, "token "+symbol+" has not reverted "+strconv.Itoa(MaxSweepReverts)+" times for this generation")
+	}
+	if hasOpenSweep(gen) {
+		return "", ce.NewContractError(ce.ErrIntent, "a sweep is open for this generation")
+	}
+	sdk.StateDeleteObject(sweepRevertKey(gen, symbol))
+	sdk.Log("tokenretry|g=" + strconv.FormatUint(uint64(gen), 10) + "|a=" + symbol)
+	return "token " + symbol + " of generation " + strconv.FormatUint(uint64(gen), 10) + " will be swept again", nil
 }
 
 // HandleWriteOffToken writes off a token a superseded generation can no longer

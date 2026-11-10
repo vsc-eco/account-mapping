@@ -394,6 +394,14 @@ func custodyVerdict(asset string, h uint64, held, book, gap *big.Int) string {
 		sdk.Log("security|evm-custody-short" + logTag + "|h=" + hs + "|held=" + held.String() + "|book=" + book.String())
 		return "custody short at block " + hs + tag + ": held " + held.String() + " < booked " + book.String()
 	}
+	// CUSTODY-STALE-HEADER-1: a proof from before the block the asset was found
+	// short at shows the vault before the loss, so it cannot lift the halt (a
+	// proof is only bounded below by the newest credited deposit's block). Only a
+	// proof at that block or a newer one, or the owner's setCustodyCheck, can.
+	if s := assetShortHeight(asset); s > h {
+		return "custody held at block " + hs + tag + ", older than the shortfall found at block " +
+			strconv.FormatUint(s, 10) + ": prove at that block or a newer one to lift it"
+	}
 	if clearAssetShort(asset) {
 		sdk.Log("custody|solvent" + logTag + "|h=" + hs + "|held=" + held.String() + "|book=" + book.String())
 	}
@@ -420,6 +428,17 @@ func adoptLegacyHalt() {
 func AssetShort(asset string) bool {
 	v := sdk.StateGetObject(constants.AssetShortPrefix + asset)
 	return v != nil && *v != ""
+}
+
+// assetShortHeight is the L1 block asset was first found short at (its flag's
+// value), 0 if it is not short.
+func assetShortHeight(asset string) uint64 {
+	v := sdk.StateGetObject(constants.AssetShortPrefix + asset)
+	if v == nil || *v == "" {
+		return 0
+	}
+	n, _ := strconv.ParseUint(*v, 10, 64)
+	return n
 }
 
 func setAssetShort(asset, h string) {

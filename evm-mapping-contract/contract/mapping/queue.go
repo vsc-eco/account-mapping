@@ -159,6 +159,17 @@ func drainWith(chainId uint64, vault [20]byte, max int) int {
 			issued++
 		case queueRefund:
 			refundQueued(seq, q, why)
+		case queueWait:
+			// D-4: an entry that waits changes nothing (it stays queued) and says
+			// nothing about the entries behind it: a token withdrawal waiting on
+			// the gas reserve, or one waiting for its token to be swept to the
+			// active generation, while an ETH withdrawal behind it could go now.
+			// Counted, 32 of them at the head used up MaxDrainScan and every
+			// withdrawal behind them waited (for a top-up, or for the token
+			// sweep, which can be wedged until the owner retries it). Waits do
+			// not count against the scan budget; MaxQueueWalk still bounds the
+			// slots one call reads.
+			scanned--
 		}
 	}
 	return issued
