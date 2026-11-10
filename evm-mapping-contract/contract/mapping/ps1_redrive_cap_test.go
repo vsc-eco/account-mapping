@@ -30,6 +30,41 @@ func TestPS1_SweepRedrivesAreCapped(t *testing.T) {
 	}
 }
 
+// CG-A7: past the cap the owner may still re-drive (a sweep whose fee fell
+// behind after the cap would never mine otherwise), under every other rule.
+func TestCGA7_OwnerRedrivesPastTheCap(t *testing.T) {
+	w := newMigWorld(t)
+	addGasReserve(wei("1000000000000000000000"))
+	setVaultBook(0, "usdc", new(big.Int))
+	if _, err := HandleMigrateVault(1, w.accountProof(w.gen0, 0, VaultBook(0, "eth"))); err != nil {
+		t.Fatal(err)
+	}
+	for len(GetSweep(0, 0).Versions) < MaxSweepVersions {
+		w.advance(SweepRedriveL1Blocks)
+		if _, err := HandleRedriveSweep(0, 0, 1); err != nil {
+			t.Fatalf("re-drive %d: %v", len(GetSweep(0, 0).Versions), err)
+		}
+	}
+	w.advance(SweepRedriveL1Blocks)
+	if _, err := HandleRedriveSweep(0, 0, 1); err == nil || !strings.Contains(err.Error(), "only the owner") {
+		t.Fatalf("operator past the cap: %v, want the cap refusal naming the owner", err)
+	}
+	before := GetSweep(0, 0).Versions[MaxSweepVersions-1]
+	if _, err := HandleOwnerRedriveSweep(0, 0, 1); err != nil {
+		t.Fatalf("owner past the cap: %v", err)
+	}
+	r := GetSweep(0, 0)
+	if len(r.Versions) != MaxSweepVersions+1 {
+		t.Fatalf("%d versions after the owner's re-drive, want %d", len(r.Versions), MaxSweepVersions+1)
+	}
+	if after := r.Versions[MaxSweepVersions]; after.FeeCap <= before.FeeCap || after.TipCap <= before.TipCap {
+		t.Fatalf("owner re-drive did not raise the fee: fee cap %d -> %d, tip %d -> %d", before.FeeCap, after.FeeCap, before.TipCap, after.TipCap)
+	}
+	if _, err := HandleOwnerRedriveSweep(0, 0, 1); err == nil || !strings.Contains(err.Error(), "re-drive from L1") {
+		t.Fatalf("owner re-drive before the interval: %v, want the interval refusal", err)
+	}
+}
+
 // PS-1 (BTC cold-scan C / V5-4): a re-drive may not spend more than half of
 // what an ETH sweep moves on gas.
 func TestPS1_SweepRedriveFeeCeiling(t *testing.T) {

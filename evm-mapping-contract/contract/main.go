@@ -354,13 +354,23 @@ type sweepIdParams struct {
 	Nonce uint64 `json:"nonce"`
 }
 
+// redriveHandler is the re-drive for this call: the owner's goes past the
+// version cap (CG-A7), the operator's does not. checkOperator has already
+// required the owner's active authority.
+func redriveHandler() func(uint32, uint64, uint64) (string, error) {
+	if owner := sdk.GetEnvKey("contract.owner"); owner != nil && sdk.GetEnv().Caller.String() == *owner {
+		return mapping.HandleOwnerRedriveSweep
+	}
+	return mapping.HandleRedriveSweep
+}
+
 //go:wasmexport redriveSweep
 func redriveSweep(input *string) *string {
 	checkOperator()
 	assertNotPaused()
 	var p sweepIdParams
 	unmarshalParams(input, &p)
-	out, err := mapping.HandleRedriveSweep(p.Gen, p.Nonce, chainId())
+	out, err := redriveHandler()(p.Gen, p.Nonce, chainId())
 	if err != nil {
 		ce.CustomAbort(err)
 	}
