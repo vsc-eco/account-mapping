@@ -89,7 +89,9 @@ const (
 	// MaxSpendGroupMembers 64, "cold-scan B"): each version raises the fee 10%
 	// and books its extra gas from the reserve though only one can mine, so a
 	// sweep stuck for another reason (its signature, a nonce gap) must not be
-	// re-driven forever. Past it the owner resolves the sweep by hand.
+	// re-driven forever. Past it only the owner may re-drive it
+	// (HandleOwnerRedriveSweep, CG-A7): a sweep whose fee fell behind after the
+	// cap would otherwise never mine, and its generation never drain.
 	MaxSweepVersions = 64
 	// MaxSweepReverts is how many reverted transfers of one token a generation
 	// takes before migration stops trying it (an owner write-off is then due).
@@ -814,6 +816,18 @@ func requireSweepKey(gen uint32) error {
 }
 
 func HandleRedriveSweep(gen uint32, nonce uint64, chainId uint64) (string, error) {
+	return redriveSweepAt(gen, nonce, chainId, false)
+}
+
+// HandleOwnerRedriveSweep is HandleRedriveSweep for the owner, also past the
+// MaxSweepVersions cap (CG-A7). Every other rule holds: the re-drive interval,
+// the 10% fee step, the gas reserve, the half-the-sweep fee ceiling and the
+// sweep key's status.
+func HandleOwnerRedriveSweep(gen uint32, nonce uint64, chainId uint64) (string, error) {
+	return redriveSweepAt(gen, nonce, chainId, true)
+}
+
+func redriveSweepAt(gen uint32, nonce uint64, chainId uint64, pastCap bool) (string, error) {
 	if err := requireSweepKey(gen); err != nil {
 		return "", err
 	}
@@ -821,9 +835,9 @@ func HandleRedriveSweep(gen uint32, nonce uint64, chainId uint64) (string, error
 	if r == nil {
 		return "", ce.NewContractError(ce.ErrIntent, "no open sweep "+sweepKey(gen, nonce))
 	}
-	if len(r.Versions) >= MaxSweepVersions {
+	if len(r.Versions) >= MaxSweepVersions && !pastCap {
 		return "", ce.NewContractError(ce.ErrIntent, "sweep "+sweepKey(gen, nonce)+" has reached the re-drive cap of "+
-			strconv.Itoa(MaxSweepVersions)+" versions: it is not stuck on its fee")
+			strconv.Itoa(MaxSweepVersions)+" versions: it is not stuck on its fee; past the cap only the owner can re-drive it")
 	}
 	l1 := blocklist.GetLastHeight()
 	if l1 < r.BuiltL1+SweepRedriveL1Blocks {
