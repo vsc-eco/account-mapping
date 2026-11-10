@@ -369,8 +369,10 @@ const (
 // at 0 for the active generation. WithdrawCeilingPrefix (wnc-{gen}) is the
 // first nonce after them: its sweeps start there, and its key signs nothing
 // else below it. ETHSweptPrefix (vse-{gen}) marks a generation whose ETH has
-// been swept from a proven balance: ETH of one of its withdrawals refunded
-// later went with that sweep.
+// been swept from a proven balance, and holds the L1 block of that proof
+// ("1" when written before the block was kept): ETH of one of its withdrawals
+// refunded later, and an ETH deposit mined at or before that block, went with
+// that sweep.
 const (
 	WithdrawNonceHolderKey = "wnh"
 	WithdrawCeilingPrefix  = "wnc" + DirPathDelimiter

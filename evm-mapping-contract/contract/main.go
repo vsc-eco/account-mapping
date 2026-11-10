@@ -407,6 +407,22 @@ func writeOffToken(input *string) *string {
 	return &out
 }
 
+// retryTokenSweep is writeOffToken's non-lossy alternative (D-2): migration
+// tries the token again. Same params and gates.
+//
+//go:wasmexport retryTokenSweep
+func retryTokenSweep(input *string) *string {
+	checkOwner()
+	assertNotPaused()
+	var p writeOffTokenParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleRetryTokenSweep(p.Gen, p.Symbol)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out
+}
+
 // -----------------------------------------------------------------------------
 // User-facing wasmexports (NOT admin — no propose/execute wrapping)
 // -----------------------------------------------------------------------------
