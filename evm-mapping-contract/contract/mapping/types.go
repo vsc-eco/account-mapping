@@ -226,6 +226,10 @@ type ParsedTx struct {
 	V       byte
 	R       []byte
 	S       []byte
+	// GasTipCap and GasFeeCap (EVM-FEE-1): the signed priority fee and fee
+	// cap (legacy / EIP-2930: both the gas price). 0 when unreadable.
+	GasTipCap uint64
+	GasFeeCap uint64
 }
 
 // DexInstruction for swap routing

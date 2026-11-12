@@ -208,6 +208,7 @@ func GetPendingSpend(nonce uint64) *PendingSpend {
 func DeletePendingSpend(nonce uint64) {
 	key := constants.TxSpendsPrefix + strconv.FormatUint(nonce, 10)
 	sdk.StateDeleteObject(key)
+	clearSpendGasShares(nonce) // EVM-FEE-1: gx-/gt- go with the spend
 }
 
 // BuildETHWithdrawalTx constructs an EIP-1559 transaction for native ETH

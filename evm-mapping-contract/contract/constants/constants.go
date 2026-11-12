@@ -159,6 +159,20 @@ const ETHGasLimitKey = "egl"
 // price. A deposit pays it out of its credit, a withdrawal on top of its debit;
 // it goes to ProofFeeRecipient as an ordinary Magi balance.
 const ProofFeePrefix = "pf-"
+
+// EVM-FEE-1: a mined withdrawal whose real gas cost waits for
+// refundWithdrawalGas (mapping/gas_settle.go): gs-{nonce} -> JSON record;
+// GasSettleListKey lists the open ones ('|'-joined nonces) for the bot.
+const GasSettlePrefix = "gs" + DirPathDelimiter
+const GasSettleListKey = "gsl"
+
+// Kept beside a pending withdrawal, not in it, so the withdrawal record (and
+// unmapETH's RC, near the 10k limit Altera sends) does not grow: gx-{nonce}
+// is the gas a fee bump drew from the reserve on top of the prepaid fee,
+// gt-{nonce} the token an ERC-20 withdrawal paid for its gas. Both are
+// deleted with the pending spend.
+const GasReserveExtraPrefix = "gx" + DirPathDelimiter
+const GasTokenFeePrefix = "gt" + DirPathDelimiter
 const ProofFeeRecipient = "hive:altera.app"
 
 // TokenGasRatePrefix (tgr-{symbol}) is the owner-set price of 1 ETH in a

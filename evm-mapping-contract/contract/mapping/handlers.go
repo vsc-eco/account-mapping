@@ -550,6 +550,7 @@ func chargeResignGas(ps *PendingSpend, gasUnits, feeCap uint64) {
 		}
 	}
 	ps.GasCost = prepaid.Add(prepaid, charged)
+	addSpendReserveExtra(ps.Nonce, charged) // EVM-FEE-1: the reserve's share of the prepaid gas
 	if short := new(big.Int).Sub(extra, charged); short.Sign() > 0 {
 		sdk.Log("gasdebt|n=" + strconv.FormatUint(ps.Nonce, 10) + "|v=" + short.String())
 	}
@@ -729,6 +730,13 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		return ce.NewContractError(ce.ErrInput, "invalid receipt RLP")
 	}
 	paid := items[0].AsUint64() == 1
+	// EVM-FEE-1: the real gas cost is settled from this receipt and header once
+	// the pending spend is closed, on both branches (a reverted withdrawal
+	// burned gas too).
+	settled := *ps
+	userGas, tokenGasFee := spendGasShares(ps)
+	cumulative, _ := receiptCumulativeGas(receiptBytes)
+	price := effectiveGasPrice(parsedTx, header.BaseFeePerGas)
 	if paid && ps.Asset != constants.NativeAsset {
 		// A36: a token that returns false instead of reverting leaves status 1
 		// with nothing moved. Paid only with its Transfer of the amount from the
@@ -764,6 +772,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
 	}
+	finishWithdrawalGas(&settled, userGas, tokenGasFee, cumulative, price, req.BlockHeight, req.TxIndex)
 
 	return nil
 }

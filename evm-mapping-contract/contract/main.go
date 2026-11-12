@@ -584,6 +584,20 @@ func confirmSpend(input *string) *string {
 	return nil
 }
 
+// refundWithdrawalGas settles a mined withdrawal's real L1 gas cost that
+// confirmSpend recorded (EVM-FEE-1): {"nonce":N,"receipt_proof":"<base64>"},
+// the proof of the receipt before it in the same block. Permissionless.
+//
+//go:wasmexport refundWithdrawalGas
+func refundWithdrawalGas(input *string) *string {
+	var p mapping.RefundWithdrawalGasParams
+	unmarshalParams(input, &p)
+	if err := mapping.HandleRefundWithdrawalGas(&p); err != nil {
+		ce.CustomAbort(ce.WrapContractError(ce.ErrInput, err))
+	}
+	return nil
+}
+
 //go:wasmexport transfer
 func transfer(input *string) *string {
 	var params mapping.TransferParams
