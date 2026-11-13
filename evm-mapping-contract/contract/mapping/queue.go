@@ -225,8 +225,33 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		if ferr != nil {
 			return queueWait, ""
 		}
-		if q.FeeCap != nil && feeWei.Cmp(q.FeeCap) > 0 {
-			return queueRefund, "fee " + feeWei.String() + " above the cap " + q.FeeCap.String()
+		// The caller's limit: what the request authorized (MaxFee), or FeeCap for
+		// an entry queued before EVM-QCAP-1.
+		limit := q.MaxFee
+		if limit == nil {
+			limit = q.FeeCap
+		}
+		if limit != nil && feeWei.Cmp(limit) > 0 {
+			return queueRefund, "fee " + feeWei.String() + " above the cap " + limit.String()
+		}
+		// EVM-QCAP-1: a request expecting to issue at once set aside the exact
+		// fee at its own price (FeeCap). If it was queued instead (A01: the new
+		// generation could not pay it yet) and the fee rose while it waited,
+		// within the limit, the owner's own direct withdrawal is charged the rest
+		// from its balance now, as the BTC mapping contract's drain charges a
+		// queued unmap the rest of its miner fee (unmap_queue.go payQueuedUnmap).
+		// It is refunded only when the balance cannot cover it, or when it is a
+		// contract's or allowance spender's withdrawal (BTC never queues those).
+		// A netted fee (DeductFee) comes out of the amount: nothing to charge.
+		rise := new(big.Int)
+		if !q.DeductFee && q.FeeCap != nil && feeWei.Cmp(q.FeeCap) > 0 {
+			rise.Sub(feeWei, q.FeeCap)
+			if !q.ChargeRise {
+				return queueRefund, "fee " + feeWei.String() + " above the " + q.FeeCap.String() + " set aside (a contract's or spender's withdrawal is not charged later)"
+			}
+			if GetBalance(q.From, constants.NativeAsset).Cmp(rise) < 0 {
+				return queueRefund, "balance cannot cover the fee rise " + rise.String()
+			}
 		}
 		l1Value := new(big.Int).Set(q.Amount)
 		if q.DeductFee {
@@ -242,9 +267,14 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		if q.DeductFee {
 			userCost.Set(q.Amount)
 		} else {
-			// Fee on top: the caller authorized FeeCap; return what the
-			// priced fee does not use.
-			if unused := new(big.Int).Sub(q.FeeCap, feeWei); unused.Sign() > 0 {
+			// Fee on top: the caller set aside FeeCap; return what the priced
+			// fee does not use, or charge a rise (checked above).
+			if rise.Sign() > 0 {
+				if !DecBalance(q.From, constants.NativeAsset, rise) {
+					return queueRefund, "balance cannot cover the fee rise " + rise.String() // checked above; nothing written yet
+				}
+				TrackWithdrawal(constants.NativeAsset, rise)
+			} else if unused := new(big.Int).Sub(q.FeeCap, feeWei); unused.Sign() > 0 {
 				IncBalance(q.refundAccount(), constants.NativeAsset, unused)
 				trackRefund(constants.NativeAsset, unused)
 			}

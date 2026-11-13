@@ -266,9 +266,14 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	if err := failFastOverCap(gas, feeCap); err != nil {
 		return "", err
 	}
-	// Issued in this call: debit the exact fee, so issue refunds nothing.
-	if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) <= 0 {
-		feeCap = fee
+	// Expected to issue in this call: set aside the exact fee, so issue refunds
+	// nothing. EVM-QCAP-1: if it is queued after all (A01: the new generation
+	// cannot pay it yet), what the caller authorized stays its limit (MaxFee)
+	// and a fee that rises while it waits is charged at issue (issueQueued).
+	// Stored only when the fee was narrowed: otherwise FeeCap is the limit.
+	var authorized *big.Int
+	if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
+		authorized, feeCap = feeCap, fee
 	}
 	// The fee is priced when the withdrawal is issued (RP-11); the caller
 	// authorizes up to feeCap and gets the unused part back at issue.
@@ -298,16 +303,27 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 	// authorization is booked back at issue, a cancel books back all of it.
 	TrackWithdrawal(constants.NativeAsset, userDebit)
 	return submitWithdrawal(QueuedWithdrawal{
-		From:      caller,
-		To:        params.To,
-		Asset:     constants.NativeAsset,
-		Amount:    amount,
-		Debit:     userDebit,
-		FeeCap:    feeCap,
-		DeductFee: params.DeductFee,
-		GasLimit:  gas,
-		RefundTo:  params.RefundTo,
+		From:       caller,
+		To:         params.To,
+		Asset:      constants.NativeAsset,
+		Amount:     amount,
+		Debit:      userDebit,
+		FeeCap:     feeCap,
+		MaxFee:     authorized,
+		ChargeRise: authorized != nil && isOwnDirectWithdrawal(env, caller),
+		DeductFee:  params.DeductFee,
+		GasLimit:   gas,
+		RefundTo:   params.RefundTo,
 	}, vaultAddress, chainId)
+}
+
+// isOwnDirectWithdrawal reports whether the debited account is the caller and
+// the caller is the transaction's own signer (not a contract call). Parity
+// with the BTC mapping contract's isOwnDirectWithdrawal (unmap_queue.go): only
+// such a withdrawal may be charged later, at issue (EVM-QCAP-1).
+func isOwnDirectWithdrawal(env sdk.Env, from string) bool {
+	caller := env.Caller.String()
+	return from == caller && caller == env.Sender.Address.String()
 }
 
 // checkRefundTo admits a withdrawal's refund_to: only a contract caller may
@@ -1446,8 +1462,14 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		if ferr := failFastOverCap(gas, feeCap); ferr != nil {
 			return ferr
 		}
-		if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) <= 0 {
-			feeCap = fee
+		// EVM-QCAP-1: a narrowed fee keeps the authorized limit as MaxFee. A
+		// spender's withdrawal is never charged later (ChargeRise false): the
+		// owner's allowance covered only this debit, so a fee on top that rose
+		// while it waited is refunded; a netted fee (DeductFee) can rise within
+		// MaxFee.
+		var authorized *big.Int
+		if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
+			authorized, feeCap = feeCap, fee
 		}
 		if params.DeductFee {
 			if amount.Cmp(feeCap) <= 0 {
@@ -1456,7 +1478,7 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		} else {
 			userDebit.Add(amount, feeCap)
 		}
-		q.Asset, q.FeeCap, q.DeductFee, q.GasLimit = constants.NativeAsset, feeCap, params.DeductFee, gas
+		q.Asset, q.FeeCap, q.MaxFee, q.DeductFee, q.GasLimit = constants.NativeAsset, feeCap, authorized, params.DeductFee, gas
 	}
 	// The proving fee is the owner's too, on top of the debit.
 	proofFee := ProofFee(q.Asset)
