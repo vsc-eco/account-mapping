@@ -267,15 +267,26 @@ type QueuedWithdrawal struct {
 	// Debit is what left the owner's balance: ETH = Amount + FeeCap (fee on
 	// top) or Amount (DeductFee); ERC-20 = Amount. Refunded in full on cancel.
 	Debit *big.Int `json:"debit"`
-	// FeeCap (ETH only) is the fee the owner authorized; the priced fee must
-	// not exceed it, and the unused part is refunded at issue.
+	// FeeCap (ETH only) is the fee the request set aside: inside Debit for a
+	// fee on top. The unused part is refunded at issue. An entry queued before
+	// EVM-QCAP-1 has no MaxFee, and its FeeCap is also its limit.
 	FeeCap    *big.Int `json:"fee_cap,omitempty"`
 	DeductFee bool     `json:"deduct_fee,omitempty"`
 	// ERC-20: snapshotted from the token registry at request time.
 	RevertFee *big.Int `json:"revert_fee,omitempty"`
 	GasLimit  uint64   `json:"gas_limit,omitempty"`
-	// MaxFee (ERC-20) is the caller's cap on the reserve-paid gas, if set.
+	// MaxFee is the caller's limit on the fee. ERC-20: the caller's cap on the
+	// reserve-paid gas, if set. ETH (EVM-QCAP-1): what the request authorized,
+	// the caller's max_fee or else the default cap; the priced fee must not
+	// exceed it, however long the entry waited.
 	MaxFee *big.Int `json:"max_fee,omitempty"`
+	// ChargeRise (ETH, fee on top) marks the owner's own direct withdrawal: a
+	// fee that rose above FeeCap while it waited, within MaxFee, is charged
+	// from the owner's balance at issue, as the BTC mapping contract's drain
+	// charges a queued unmap the rest of its miner fee (WQ-1). A contract's or
+	// an allowance spender's withdrawal is refunded instead (BTC never queues
+	// those).
+	ChargeRise bool `json:"charge_rise,omitempty"`
 	// RefundTo: where refunds go when a contract withdrew for a user (see
 	// TransferParams.RefundTo); empty = From.
 	RefundTo string `json:"refund_to,omitempty"`
