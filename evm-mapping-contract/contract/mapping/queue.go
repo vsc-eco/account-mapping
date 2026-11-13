@@ -299,6 +299,9 @@ func issueQueued(q *QueuedWithdrawal, vault [20]byte, chainId uint64, header *bl
 		unsigned = BuildERC20WithdrawalTxGas(chainId, nonce, gasTipCap, gasFeeCap, tokenAddr, toAddr, send, q.GasLimit)
 		ps.Amount = send
 		ps.GasCost = gasCost
+		if gasFee != nil && gasFee.Sign() > 0 {
+			setSpendTokenGasFee(nonce, gasFee) // EVM-FEE-1: refunded pro rata at settlement
+		}
 		ps.RevertFee = q.RevertFee
 		ps.GasLimit = q.GasLimit
 		userCost.Set(q.Amount)

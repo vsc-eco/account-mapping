@@ -366,18 +366,19 @@ func parseTransaction(raw []byte) (*ParsedTx, error) {
 type typedTxLayout struct {
 	name                  string
 	fields, to, value, in int
+	tip, feeCap           int // EVM-FEE-1: fee fields (EIP-2930: the gas price in both)
 }
 
 func typedTxLayouts(txType byte) (typedTxLayout, bool) {
 	switch txType {
 	case 1: // [chainId, nonce, gasPrice, gas, to, value, data, accessList, yParity, r, s]
-		return typedTxLayout{"EIP-2930", 11, 4, 5, 6}, true
+		return typedTxLayout{"EIP-2930", 11, 4, 5, 6, 2, 2}, true
 	case 2: // [chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, yParity, r, s]
-		return typedTxLayout{"EIP-1559", 12, 5, 6, 7}, true
+		return typedTxLayout{"EIP-1559", 12, 5, 6, 7, 2, 3}, true
 	case 3: // [... accessList, maxFeePerBlobGas, blobVersionedHashes, yParity, r, s]
-		return typedTxLayout{"EIP-4844", 14, 5, 6, 7}, true
+		return typedTxLayout{"EIP-4844", 14, 5, 6, 7, 2, 3}, true
 	case 4: // [... accessList, authorizationList, yParity, r, s]
-		return typedTxLayout{"EIP-7702", 13, 5, 6, 7}, true
+		return typedTxLayout{"EIP-7702", 13, 5, 6, 7, 2, 3}, true
 	}
 	return typedTxLayout{}, false
 }
@@ -419,6 +420,14 @@ func parseTypedTx(data []byte, l typedTxLayout) (*ParsedTx, error) {
 	toBytes := items[l.to].AsBytes()
 	if len(toBytes) == 20 {
 		copy(tx.To[:], toBytes)
+	}
+	// Fee fields are read for the gas settlement only; an unreadable one is 0
+	// (nothing settled), never a parse failure.
+	if v, err := items[l.tip].AsUint64Checked(); err == nil {
+		tx.GasTipCap = v
+	}
+	if v, err := items[l.feeCap].AsUint64Checked(); err == nil {
+		tx.GasFeeCap = v
 	}
 	return tx, nil
 }
@@ -464,6 +473,9 @@ func parseLegacyTx(data []byte) (*ParsedTx, error) {
 	toBytes := items[3].AsBytes()
 	if len(toBytes) == 20 {
 		copy(parsed.To[:], toBytes)
+	}
+	if gp, err := items[1].AsUint64Checked(); err == nil { // EVM-FEE-1: the gas price
+		parsed.GasTipCap, parsed.GasFeeCap = gp, gp
 	}
 	return parsed, nil
 }
