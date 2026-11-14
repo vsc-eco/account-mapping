@@ -465,3 +465,8 @@ const (
 // briefly lag only by the gas of in-flight sweeps (about 216,000 gas for an
 // ETH and three token sweeps: 0.043 ETH at 200 gwei).
 const DefaultCustodyGapWei = "50000000000000000" // 0.05 ETH
+
+// RefundablePrefix + <asset> + "-" + <did:pkh:eip155 account> holds what sendHome may
+// return to that Ethereum address (a deposit that fell back to its sender's own
+// account, a contract's withdrawal for the account that came back).
+const RefundablePrefix = "rf" + DirPathDelimiter

@@ -197,7 +197,11 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// require a future depositor-signed mechanism (e.g. a deposit-wrapper
 		// EVM contract that emits an instruction-bearing event).
 		dest := crypto.AddressToDID(sender)
-		IncBalance(dest, tokenInfo.Symbol, takeDepositProofFee(tokenInfo.Symbol, amount))
+		credited := takeDepositProofFee(tokenInfo.Symbol, amount)
+		IncBalance(dest, tokenInfo.Symbol, credited)
+		// A plain token transfer carries no instruction (a CEX withdrawal looks like
+		// this): refundable to the address it came from.
+		markRefundable(dest, tokenInfo.Symbol, credited)
 		TrackDeposit(tokenInfo.Symbol, amount, new(big.Int))
 		targets.book(tokenInfo.Symbol, amount)
 		// CRIT #8 / W4 Cluster A + CRIT #14 logIndex: lock observed slot
@@ -224,6 +228,13 @@ func checkMinDeposit(asset string, amount *big.Int, min int64) error {
 }
 
 func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
+	return unmapETH(params, vaultAddress, chainId, "")
+}
+
+// unmapETH is HandleUnmapETH. home is set only by HandleSendHome: the debited account is
+// then that Ethereum address's own account (not the caller), the destination its
+// own address, and the amount at most what was recorded as refundable.
+func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string) (string, error) {
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
@@ -232,6 +243,9 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		return "", err
 	}
 	caller := env.Caller.String()
+	if home != "" {
+		caller = home
+	}
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
 	if !ok || amount.Sign() <= 0 {
@@ -310,7 +324,7 @@ func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint6
 		Debit:      userDebit,
 		FeeCap:     feeCap,
 		MaxFee:     authorized,
-		ChargeRise: authorized != nil && isOwnDirectWithdrawal(env, caller),
+		ChargeRise: authorized != nil && home == "" && isOwnDirectWithdrawal(env, caller),
 		DeductFee:  params.DeductFee,
 		GasLimit:   gas,
 		RefundTo:   params.RefundTo,
@@ -421,6 +435,13 @@ func optionalMaxFee(maxFee string) (*big.Int, error) {
 }
 
 func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
+	return unmapERC20(params, vaultAddress, chainId, "")
+}
+
+// unmapERC20 is HandleUnmapERC20. home is set only by HandleSendHome: the debited account is
+// then that Ethereum address's own account (not the caller), the destination its
+// own address, and the amount at most what was recorded as refundable.
+func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string) (string, error) {
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
@@ -429,6 +450,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 		return "", err
 	}
 	caller := env.Caller.String()
+	if home != "" {
+		caller = home
+	}
 
 	amount, ok := new(big.Int).SetString(params.Amount, 10)
 	if !ok || amount.Sign() <= 0 {
@@ -944,8 +968,18 @@ func hasToReserveInstruction(instructions []string) bool {
 func routeDeposit(sender [20]byte, instructions []string, asset string, amount *big.Int, chainId uint64) string {
 	did := crypto.AddressToDID(sender)
 	dest := did
+	explicit := false
 	var swapTo, assetOut, destChain string
 	var minAmountOut *string
+	// A deposit that lands on the depositor's own account by default (no usable
+	// instruction, or a swap that did not run) is refundable: that account has no
+	// RC unless it holds HBD, so sendHome must be able to return it.
+	fallback := func() string {
+		if !explicit {
+			markRefundable(dest, asset, amount)
+		}
+		return dest
+	}
 
 	// MED-66 (T2-7/CF-EVM-4) site 2: bound the instruction list. Routing needs
 	// only a handful of directives; an over-cap list is an attacker paying dust
@@ -955,7 +989,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 	// old H9 "ignore all eth instructions" stance was reversed by the
 	// parseCalldataInstructions work; the bound still applies as a DoS guard.)
 	if len(instructions) > constants.MaxDepositInstructions {
-		return dest
+		return fallback()
 	}
 	for _, instr := range instructions {
 		// A5: a destination that is not a Magi identity is ignored and the
@@ -963,6 +997,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		// strand the ETH on L1, since the depositor-signed calldata is final.
 		if len(instr) > 11 && instr[:11] == "deposit_to=" && validIdentity(instr[11:]) {
 			dest = instr[11:]
+			explicit = true
 		}
 		if len(instr) > 8 && instr[:8] == "swap_to=" && validIdentity(instr[8:]) {
 			swapTo = instr[8:]
@@ -989,7 +1024,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 	if swapTo != "" && assetOut != "" && minAmountOut != nil {
 		routerIdPtr := sdk.StateGetObject(constants.RouterContractIdKey)
 		if routerIdPtr == nil || *routerIdPtr == "" {
-			return dest
+			return fallback()
 		}
 		routerId := *routerIdPtr
 		env := sdk.GetEnv()
@@ -1014,6 +1049,7 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			Recipient:        swapTo,
 			DestinationChain: destChain,
 			MinAmountOut:     minAmountOut,
+			ReturnAddress:    &ReturnAddress{Chain: "MAGI", Address: dest},
 		})
 
 		// A9 (RV re-verify): call the router with try/catch so a router that
@@ -1033,18 +1069,33 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 		// (slot == prevAllowance, so this is a no-op restore) and on FAILURE the
 		// slot still reads prevAllowance+amount (this removes the grant; the
 		// self-credit is reversed below).
+		// What the router did not pull of THIS deposit (per-swap provenance).
+		unspent := new(big.Int).Sub(GetAllowance(selfAddr, routerSpender, asset), prevAllowance)
+		if unspent.Sign() < 0 || unspent.Cmp(amount) > 0 {
+			unspent.SetInt64(0)
+		}
 		SetAllowance(selfAddr, routerSpender, asset, prevAllowance)
 
 		if !tryCallSucceeded(result) {
 			// Router call failed/reverted. Reverse the self-balance credit and
 			// fall through to credit the depositor directly with the original asset.
 			DecBalance(selfAddr, asset, amount)
-			return dest
+			return fallback()
+		}
+		if unspent.Sign() > 0 {
+			// A router that reports success but left part of the deposit unpulled:
+			// that part would stay on this contract's own account for good.
+			DecBalance(selfAddr, asset, unspent)
+			IncBalance(dest, asset, unspent)
+			if !explicit {
+				markRefundable(dest, asset, unspent)
+			}
+			sdk.Log("swapleft|t=" + dest + "|a=" + asset + "|d=" + unspent.String())
 		}
 		return ""
 	}
 
-	return dest
+	return fallback()
 }
 
 func isPaused() bool {
@@ -1718,6 +1769,7 @@ func refundDroppedWithdrawal(ps *PendingSpend) {
 	// gas/reserve on its own path, not here.
 	refund := new(big.Int).Set(ps.Amount)
 	IncBalance(ps.refundAccount(), ps.Asset, refund)
+	noteWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, refund)
 	sup.User.Add(sup.User, refund)
@@ -1744,6 +1796,7 @@ func refundRevertedWithdrawal(ps *PendingSpend) {
 		sdk.Log("revertfee|n=" + strconv.FormatUint(ps.Nonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + constants.RevertFeeRecipient)
 	}
 	IncBalance(ps.refundAccount(), ps.Asset, refund)
+	noteWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, ps.Amount)
 	sup.User.Add(sup.User, ps.Amount)

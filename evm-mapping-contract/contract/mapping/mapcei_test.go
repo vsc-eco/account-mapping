@@ -84,12 +84,25 @@ func TestMAPCEI1_ARouterReenteringMapCannotCreditTheDepositTwice(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("router called %d times, want once", calls)
 	}
-	// 1 ETH less the 1% reserve share is user supply once, held by the bridge
-	// for the router's swap (the stub router took nothing).
+	// 1 ETH less the 1% reserve share is user supply once. The stub router
+	// reported success but took nothing: that part goes back to the depositor
+	// (refundable), never staying on the bridge's own account.
 	if s := GetSupply("eth"); s.User.Cmp(big.NewInt(99e16)) != 0 {
 		t.Fatalf("user supply %s after one 1 ETH deposit, want 0.99 ETH", s.User)
 	}
-	if self := GetBalance("contract:"+sdk.GetEnv().ContractId, "eth"); self.Cmp(big.NewInt(99e16)) != 0 {
-		t.Fatalf("the bridge holds %s for the swap, want the one deposit's 0.99 ETH", self)
+	if self := GetBalance("contract:"+sdk.GetEnv().ContractId, "eth"); self.Sign() != 0 {
+		t.Fatalf("the bridge keeps %s of the swap, want 0", self)
+	}
+	priv := secp256k1.PrivKeyFromBytes(bytesOf(t, "4646464646464646464646464646464646464646464646464646464646464646"))
+	sender, err := crypto.PubkeyAddress(priv.PubKey().SerializeUncompressed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	depositor := crypto.AddressToDID(sender)
+	if got := GetBalance(depositor, "eth"); got.Cmp(big.NewInt(99e16)) != 0 {
+		t.Fatalf("depositor %s holds %s, want the deposit's 0.99 ETH once", depositor, got)
+	}
+	if got := getRefundable(depositor, "eth"); got.Cmp(big.NewInt(99e16)) != 0 {
+		t.Fatalf("refundable %s, want 0.99 ETH", got)
 	}
 }
