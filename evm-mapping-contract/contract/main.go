@@ -465,6 +465,24 @@ func unmapETH(input *string) *string {
 	return &status // RP-11: "issued:{nonce}" or "queued:{seq}"
 }
 
+// sendHome: anyone (paying the RC) returns an Ethereum address's refundable funds of
+// one asset to that address: a deposit that fell back to its sender's own account
+// (no usable instruction, an ERC-20 transfer, a swap that did not run) or a
+// contract's withdrawal for it that came back. Input: "address=0x...&asset=eth".
+// Pause-gated through the withdrawal it makes.
+//
+//go:wasmexport sendHome
+func sendHome(input *string) *string {
+	if input == nil || *input == "" {
+		ce.CustomAbort(ce.NewContractError(ce.ErrInput, "sendHome requires address=0x...&asset=<eth|symbol>"))
+	}
+	status, err := mapping.HandleSendHome(*input, vault(), chainId())
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &status
+}
+
 // reportUnauthorizedSpend (P1): anyone proves a vault generation's address
 // sent a transaction the bridge never authorized; sets the theft halt. Not
 // pause-gated.

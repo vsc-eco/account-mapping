@@ -244,6 +244,14 @@ type DexInstruction struct {
 	// A8 (DX-H5 on BTC): the depositor's slippage floor, passed to the router
 	// unchanged; the router and the DEX enforce it.
 	MinAmountOut *string `json:"min_amount_out,omitempty"`
+	// Where the router refunds a settlement that fails after the swap (an L1
+	// withdrawal whose receipt fails): the depositor, never this contract.
+	ReturnAddress *ReturnAddress `json:"return_address,omitempty"`
+}
+
+type ReturnAddress struct {
+	Chain   string `json:"chain"`
+	Address string `json:"address"`
 }
 
 // Parsed receipt log

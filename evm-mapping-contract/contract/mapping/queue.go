@@ -186,6 +186,7 @@ const (
 // removes it (QFREEZE-1).
 func refundQueued(seq uint64, q *QueuedWithdrawal, why string) {
 	IncBalance(q.refundAccount(), q.Asset, q.Debit)
+	noteWithdrawalRefund(q.From, q.To, q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapq|refund|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|why=" + why)
@@ -367,6 +368,7 @@ func HandleCancelQueuedWithdrawal(seq uint64) error {
 		return errors.New("cancelQueuedWithdrawal: only the withdrawal's owner or the contract owner can cancel it")
 	}
 	IncBalance(q.refundAccount(), q.Asset, q.Debit)
+	noteWithdrawalRefund(q.From, q.To, q.refundAccount(), q.Asset, q.Debit)
 	trackRefund(q.Asset, q.Debit)
 	RemoveQueued(seq, q)
 	sdk.Log("unmapcancel|q=" + strconv.FormatUint(seq, 10) + "|f=" + q.From + "|a=" + q.Asset + "|d=" + q.Debit.String() + "|by=" + caller)

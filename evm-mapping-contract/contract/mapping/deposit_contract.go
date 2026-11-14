@@ -185,8 +185,10 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		return errOwnTransfer
 	}
 	dest := crypto.AddressToDID(d.sender)
+	explicit := false
 	if validIdentity(d.recipient) {
 		dest = d.recipient
+		explicit = true
 	}
 	if d.token == ([20]byte{}) {
 		if err := checkMinDeposit(constants.NativeAsset, d.amount, constants.MinETHDeposit); err != nil {
@@ -197,7 +199,11 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		if gasTax.Sign() > 0 {
 			addGasReserve(gasTax)
 		}
-		IncBalance(dest, constants.NativeAsset, takeDepositProofFee(constants.NativeAsset, net))
+		credited := takeDepositProofFee(constants.NativeAsset, net)
+		IncBalance(dest, constants.NativeAsset, credited)
+		if !explicit {
+			markRefundable(dest, constants.NativeAsset, credited)
+		}
 		TrackDeposit(constants.NativeAsset, net, gasTax)
 		targets.book(constants.NativeAsset, d.amount)
 	} else {
@@ -215,7 +221,11 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		if IsObserved(req.BlockHeight, txHash, uint16(j)) {
 			return ErrAlreadyObserved
 		}
-		IncBalance(dest, info.Symbol, takeDepositProofFee(info.Symbol, d.amount))
+		credited := takeDepositProofFee(info.Symbol, d.amount)
+		IncBalance(dest, info.Symbol, credited)
+		if !explicit {
+			markRefundable(dest, info.Symbol, credited)
+		}
 		TrackDeposit(info.Symbol, d.amount, new(big.Int))
 		targets.book(info.Symbol, d.amount)
 		MarkObserved(req.BlockHeight, txHash, uint16(j))
