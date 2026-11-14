@@ -150,3 +150,66 @@ func TestSendHome_AnyoneReturnsItToTheAddressItself(t *testing.T) {
 	}
 	sdk.ResetStubState()
 }
+
+// A token goes home under the symbol it is registered with (USDC here): the
+// ledger's balance keys and token index are case-sensitive. The sendHome input
+// used to be lowercased, so a token registered in capitals could never go home.
+func TestSendHome_ATokenGoesHomeUnderItsRegisteredSymbol(t *testing.T) {
+	holder := crypto.AddressToDID(shSender())
+	addr := crypto.AddressToHex(shSender())
+	rpBridge(t, ethWei(1), holder, "hive:keeper") // holder: 1,000,000 USDC (6 decimals)
+	var tok [20]byte
+	tok[19] = 0xc0
+	if err := RegisterToken(1, tok, "USDC", 6, 1000); err != nil {
+		t.Fatal(err)
+	}
+	as(t, "hive:keeper", time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
+	SaveVaultState(VaultRegistry{{Generation: 0, Primary: pubOf(t, testPub1), Status: VaultStatusActive}}, 1, 0)
+
+	// What a plain USDC transfer to the vault records (handleMap, ERC-20 branch).
+	markRefundable(holder, "USDC", big.NewInt(500_000))
+	before := GetBalance(holder, "USDC")
+	keeperBefore := GetBalance("hive:keeper", "USDC")
+
+	if _, err := HandleSendHome("address="+addr+"&asset=usdc", [20]byte{1}, 1); err == nil {
+		t.Fatal("a symbol in another case names no refund and must be refused")
+	}
+	status, err := HandleSendHome("address="+addr+"&asset=USDC", [20]byte{1}, 1)
+	if err != nil {
+		t.Fatalf("sendHome USDC: %v", err)
+	}
+	if !strings.HasPrefix(status, "issued:") && !strings.HasPrefix(status, "queued:") {
+		t.Fatalf("status %q", status)
+	}
+	debited := new(big.Int).Sub(before, GetBalance(holder, "USDC"))
+	want := new(big.Int).Add(big.NewInt(500_000), ProofFee("USDC"))
+	if debited.Cmp(want) != 0 {
+		t.Fatalf("debited %s, want the refund + proof fee %s", debited, want)
+	}
+	if GetBalance("hive:keeper", "USDC").Cmp(keeperBefore) != 0 {
+		t.Fatal("the caller's own balance must not move")
+	}
+	if r := getRefundable(holder, "USDC"); r.Sign() != 0 {
+		t.Fatalf("refundable left %s after returning all of it", r)
+	}
+	if r := getRefundable(holder, "eth"); r.Sign() != 0 {
+		t.Fatalf("an ETH record appeared: %s", r)
+	}
+	sdk.ResetStubState()
+}
+
+func TestSendHome_EthInAnyCase(t *testing.T) {
+	holder := crypto.AddressToDID(shSender())
+	addr := crypto.AddressToHex(shSender())
+	rpBridge(t, new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18)), holder, "hive:keeper")
+	as(t, "hive:keeper", time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
+	SaveVaultState(VaultRegistry{{Generation: 0, Primary: pubOf(t, testPub1), Status: VaultStatusActive}}, 1, 0)
+	markRefundable(holder, "eth", big.NewInt(1e17))
+	if _, err := HandleSendHome("address="+addr+"&asset=ETH", [20]byte{1}, 1); err != nil {
+		t.Fatalf("sendHome ETH: %v", err)
+	}
+	if r := getRefundable(holder, "eth"); r.Sign() != 0 {
+		t.Fatalf("refundable left %s", r)
+	}
+	sdk.ResetStubState()
+}

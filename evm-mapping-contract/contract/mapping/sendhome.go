@@ -23,8 +23,10 @@ import (
 
 const evmDIDPrefix = "did:pkh:eip155:"
 
+// refundableKey uses the asset exactly as the ledger does: token symbols are
+// case-sensitive (a token registered as USDC has its balance under USDC).
 func refundableKey(account, asset string) string {
-	return constants.RefundablePrefix + strings.ToLower(asset) + constants.DirPathDelimiter + account
+	return constants.RefundablePrefix + asset + constants.DirPathDelimiter + account
 }
 
 func getRefundable(account, asset string) *big.Int {
@@ -83,8 +85,10 @@ func HandleSendHome(input string, vaultAddress [20]byte, chainId uint64) (string
 	if err != nil || addr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "sendHome needs an Ethereum address")
 	}
-	asset := strings.ToLower(strings.TrimSpace(params.Get("asset")))
-	if asset == "" {
+	// ETH in any case; a token by its registered symbol, exactly (the ledger's
+	// balance keys and the token index are case-sensitive).
+	asset := strings.TrimSpace(params.Get("asset"))
+	if asset == "" || strings.EqualFold(asset, constants.NativeAsset) {
 		asset = constants.NativeAsset
 	}
 	account := crypto.AddressToDID(addr)
