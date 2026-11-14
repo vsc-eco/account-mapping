@@ -466,6 +466,9 @@ func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uin
 	if err := refuseVaultDestination(recipientAddr, vaultAddress); err != nil {
 		return "", err
 	}
+	if recipientAddr == tokenAddr {
+		return "", errTokenDestination
+	}
 	// MED-83: the caller's cap on the reserve-paid gas, checked at issue.
 	maxFee, err := optionalMaxFee(params.MaxFee)
 	if err != nil {
@@ -1433,6 +1436,9 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		// asset could drain an expensive token. (Also closes E1 on this path.)
 		if params.Asset != tokenInfo.Symbol {
 			return ce.NewContractError(ce.ErrInput, "asset does not match the token's registered symbol")
+		}
+		if toAddr == tokenAddr {
+			return errTokenDestination
 		}
 		if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 {
 			return ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")

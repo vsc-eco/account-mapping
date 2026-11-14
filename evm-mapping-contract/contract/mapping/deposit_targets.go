@@ -96,6 +96,14 @@ func refuseVaultDestination(to, vault [20]byte) error {
 	return nil
 }
 
+// errTokenDestination refuses an ERC-20 withdrawal paid to the token contract
+// itself (TC04-1, from THORChain's evm-null-address-outbound test): a token
+// without a self-transfer guard keeps the tokens at its own address forever,
+// and one with a guard (USDC) reverts, so the reserve fronts the gas of a
+// payout that cannot land. Self-harm, no theft, cheap to reject at request,
+// like the zero address and the vault's own addresses.
+var errTokenDestination = ce.NewContractError(ce.ErrInput, "refusing withdrawal to the token contract itself: the tokens would be stuck at the token's own address")
+
 // errOwnTransfer refuses a "deposit" sent by the vault itself.
 var errOwnTransfer = ce.NewContractError(ce.ErrInput, "the sender is one of the vault's own addresses: a sweep or a withdrawal to the vault, not a deposit")
 
