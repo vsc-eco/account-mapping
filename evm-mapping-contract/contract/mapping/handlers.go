@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // IsWhitelistedRelayer — W4 Cluster C CRIT #8 native-ETH frontrun mitigation
@@ -263,7 +264,7 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(toAddr, vaultAddress, false); err != nil {
 		return "", err
 	}
 	if err := checkRefundTo(caller, params.RefundTo); err != nil {
@@ -487,7 +488,7 @@ func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, h
 	if recipientAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(recipientAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(recipientAddr, vaultAddress, true); err != nil {
 		return "", err
 	}
 	if recipientAddr == tokenAddr {
@@ -1080,6 +1081,10 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			// Router call failed/reverted. Reverse the self-balance credit and
 			// fall through to credit the depositor directly with the original asset.
 			DecBalance(selfAddr, asset, amount)
+			// Say why (as the BTC mapping contract's "swaprefund|...|r=" line does):
+			// without it a swap that did not run looks like a plain deposit to the
+			// user, the indexer and the bot.
+			sdk.Log("swapfail|t=" + dest + "|a=" + asset + "|d=" + amount.String() + "|r=" + tryCallError(result))
 			return fallback()
 		}
 		if unspent.Sign() > 0 {
@@ -1102,6 +1107,42 @@ func isPaused() bool {
 	data := sdk.StateGetObject(constants.PausedKey)
 	return data != nil && *data == "1"
 }
+
+// tryCallError is the reason a failed try/catch ContractCall gives, for a log
+// line: the callee's error text ("reverted: <text>"), or what was wrong with the
+// outcome itself. Log fields are pipe-delimited, so the text is kept on one line
+// without pipes and capped at maxLogReason bytes.
+func tryCallError(result *string) string {
+	if result == nil {
+		return "no result"
+	}
+	var outcome struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(*result), &outcome); err != nil {
+		return "unparseable result"
+	}
+	if outcome.Error == "" {
+		return "reverted"
+	}
+	reason := "reverted: " + strings.Map(func(r rune) rune {
+		if r == '|' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, outcome.Error)
+	if len(reason) > maxLogReason {
+		cut := maxLogReason
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut-- // never cut inside a multi-byte character
+		}
+		reason = reason[:cut]
+	}
+	return reason
+}
+
+// maxLogReason bounds the free text a contract error may put in a log line.
+const maxLogReason = 160
 
 // tryCallSucceeded reports whether a try/catch ContractCall (A9) succeeded.
 // With ContractCallOptions.Try the host returns a structured outcome
@@ -1459,7 +1500,7 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 	if toAddr == ([20]byte{}) {
 		return ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(toAddr, vaultAddress, params.Asset != constants.NativeAsset); err != nil {
 		return err
 	}
 
