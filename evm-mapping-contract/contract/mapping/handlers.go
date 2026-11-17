@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // IsWhitelistedRelayer — W4 Cluster C CRIT #8 native-ETH frontrun mitigation
@@ -1131,7 +1132,11 @@ func tryCallError(result *string) string {
 		return r
 	}, outcome.Error)
 	if len(reason) > maxLogReason {
-		reason = reason[:maxLogReason]
+		cut := maxLogReason
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut-- // never cut inside a multi-byte character
+		}
+		reason = reason[:cut]
 	}
 	return reason
 }
