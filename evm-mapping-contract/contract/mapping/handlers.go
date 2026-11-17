@@ -264,7 +264,7 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 	if toAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(toAddr, vaultAddress, false); err != nil {
 		return "", err
 	}
 	if err := checkRefundTo(caller, params.RefundTo); err != nil {
@@ -488,7 +488,7 @@ func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, h
 	if recipientAddr == ([20]byte{}) {
 		return "", ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(recipientAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(recipientAddr, vaultAddress, true); err != nil {
 		return "", err
 	}
 	if recipientAddr == tokenAddr {
@@ -1500,7 +1500,7 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 	if toAddr == ([20]byte{}) {
 		return ce.NewContractError(ce.ErrInput, "refusing withdrawal to zero address")
 	}
-	if err := refuseVaultDestination(toAddr, vaultAddress); err != nil {
+	if err := refuseVaultDestination(toAddr, vaultAddress, params.Asset != constants.NativeAsset); err != nil {
 		return err
 	}
 

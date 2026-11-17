@@ -70,15 +70,35 @@ func isPurgedGenAddress(a [20]byte) bool {
 // the same reason ("self-harm, no theft, but cheap to reject outright").
 var errVaultDestination = ce.NewContractError(ce.ErrInput, "refusing withdrawal to one of the vault's own addresses: the payout would stay in the vault and never be credited back")
 
+// errDepositContractDestination refuses a TOKEN withdrawal paid to a fund-holding
+// generation's MagiDeposit contract (EVM-OUT-DEST-1, testnet 11-17): the address
+// a wallet shows for deposits. MagiDeposit has no way to pay out what it holds,
+// so a token transfer to it succeeds and stays there for good.
+//
+// An ETH withdrawal to it is NOT refused here: it reverts on L1 and is refunded
+// (minus the gas and the proof fee), and the check costs 8 RC that the ETH path
+// does not have: a withdrawal with its own gas_limit runs at 9,995 RC, and
+// wallets send 10,000 (real-wasm suite, GLAM-1).
+var errDepositContractDestination = ce.NewContractError(ce.ErrInput, "refusing withdrawal to the bridge's deposit contract: it cannot pay out what is sent to it")
+
 // refuseVaultDestination is errVaultDestination when to is a fund-holding
 // generation's address: the active vault (the handler's vault, already
 // derived) or a superseded one still holding funds. Only the superseded
 // generations' addresses are derived here, so outside a rotation the check
 // costs one registry read (a first version derived every generation through
 // FundHoldingGens: +114 RC on every unmap).
-func refuseVaultDestination(to, vault [20]byte) error {
-	if vault != ([20]byte{}) && to == vault {
-		return errVaultDestination
+// For a token withdrawal each of those addresses' MagiDeposit is refused too:
+// its address is computed (no state read), for the active vault and, during a
+// rotation, the superseded ones. Purged generations are not checked: that costs
+// a read per generation on every withdrawal for good.
+func refuseVaultDestination(to, vault [20]byte, token bool) error {
+	if vault != ([20]byte{}) {
+		if to == vault {
+			return errVaultDestination
+		}
+		if token && to == DepositContractAddress(vault) {
+			return errDepositContractDestination
+		}
 	}
 	vaults, _, _, err := LoadVaultState()
 	if err != nil {
@@ -89,8 +109,13 @@ func refuseVaultDestination(to, vault [20]byte) error {
 		if v.Status == VaultStatusActive || !isFundHoldingStatus(v.Status) {
 			continue
 		}
-		if addr, ok := GenAddress(&v); ok && addr == to {
-			return errVaultDestination
+		if addr, ok := GenAddress(&v); ok {
+			if addr == to {
+				return errVaultDestination
+			}
+			if token && DepositContractAddress(addr) == to {
+				return errDepositContractDestination
+			}
 		}
 	}
 	return nil
