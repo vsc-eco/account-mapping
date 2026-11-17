@@ -213,3 +213,52 @@ func TestSendHome_EthInAnyCase(t *testing.T) {
 	}
 	sdk.ResetStubState()
 }
+
+// A swap the router refuses is credited to the sender as before, and the bridge
+// now logs why (the BTC mapping contract's swaprefund line, for the EVM side).
+func TestRouteDeposit_FailedSwapLogsTheReason(t *testing.T) {
+	did := crypto.AddressToDID(shSender())
+	cases := []struct{ name, outcome, want string }{
+		{"the router's error text", `{"ok":false,"error":"slippage tolerance exceeded"}`, "swapfail|t=" + did + "|a=eth|d=5000|r=reverted: slippage tolerance exceeded"},
+		{"no error text", `{"ok":false}`, "swapfail|t=" + did + "|a=eth|d=5000|r=reverted"},
+		{"pipes and newlines cannot break the log fields", `{"ok":false,"error":"a|b\nc"}`, "swapfail|t=" + did + "|a=eth|d=5000|r=reverted: a b c"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sdk.ResetStubState()
+			sdk.ResetTestState()
+			sdk.StateSetObject(constants.RouterContractIdKey, "vsc1router")
+			sdk.StubSetContractCallResponder(func(contractId, method, payload string) *string {
+				r := c.outcome
+				return &r
+			})
+			if got := routeDeposit(shSender(), []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "eth", big.NewInt(5_000), 1); got != did {
+				t.Fatalf("dest %q, want the sender %q", got, did)
+			}
+			found := false
+			for _, l := range sdk.TestLogs() {
+				if l == c.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("log %q not written; logs: %q", c.want, sdk.TestLogs())
+			}
+		})
+	}
+	// A swap that runs writes no swapfail line.
+	sdk.ResetStubState()
+	sdk.ResetTestState()
+	sdk.StateSetObject(constants.RouterContractIdKey, "vsc1router")
+	sdk.StubSetContractCallResponder(func(contractId, method, payload string) *string {
+		r := `{"ok":true,"result":"{}"}`
+		return &r
+	})
+	routeDeposit(shSender(), []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "eth", big.NewInt(5_000), 1)
+	for _, l := range sdk.TestLogs() {
+		if strings.HasPrefix(l, "swapfail|") {
+			t.Fatalf("a swap that ran logged %q", l)
+		}
+	}
+	sdk.ResetStubState()
+}

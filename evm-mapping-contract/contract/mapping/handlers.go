@@ -1080,6 +1080,10 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			// Router call failed/reverted. Reverse the self-balance credit and
 			// fall through to credit the depositor directly with the original asset.
 			DecBalance(selfAddr, asset, amount)
+			// Say why (as the BTC mapping contract's "swaprefund|...|r=" line does):
+			// without it a swap that did not run looks like a plain deposit to the
+			// user, the indexer and the bot.
+			sdk.Log("swapfail|t=" + dest + "|a=" + asset + "|d=" + amount.String() + "|r=" + tryCallError(result))
 			return fallback()
 		}
 		if unspent.Sign() > 0 {
@@ -1102,6 +1106,38 @@ func isPaused() bool {
 	data := sdk.StateGetObject(constants.PausedKey)
 	return data != nil && *data == "1"
 }
+
+// tryCallError is the reason a failed try/catch ContractCall gives, for a log
+// line: the callee's error text ("reverted: <text>"), or what was wrong with the
+// outcome itself. Log fields are pipe-delimited, so the text is kept on one line
+// without pipes and capped at maxLogReason bytes.
+func tryCallError(result *string) string {
+	if result == nil {
+		return "no result"
+	}
+	var outcome struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(*result), &outcome); err != nil {
+		return "unparseable result"
+	}
+	if outcome.Error == "" {
+		return "reverted"
+	}
+	reason := "reverted: " + strings.Map(func(r rune) rune {
+		if r == '|' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, outcome.Error)
+	if len(reason) > maxLogReason {
+		reason = reason[:maxLogReason]
+	}
+	return reason
+}
+
+// maxLogReason bounds the free text a contract error may put in a log line.
+const maxLogReason = 160
 
 // tryCallSucceeded reports whether a try/catch ContractCall (A9) succeeded.
 // With ContractCallOptions.Try the host returns a structured outcome
