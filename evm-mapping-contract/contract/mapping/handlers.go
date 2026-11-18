@@ -751,6 +751,14 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		}
 	}
 
+	// CONFIRM-RECEIPT-CAP-1: an ETH withdrawal whose receipt cannot be sent
+	// (the recipient's code logged KBs, over the node's payload cap) is closed
+	// on its inclusion proof, as the BTC bridge closes a payout. Its receipt is
+	// settled later (settleWithdrawalReceipt).
+	if req.ReceiptProof == "" {
+		return closeOnInclusion(ps, parsedTx, header, req)
+	}
+
 	// --- Receipt proof: determine success or failure ---
 	// EVM-T1: the receipt is the proof's leaf, so it is not sent on its own.
 	receiptProofBytes, err := base64.StdEncoding.DecodeString(req.ReceiptProof)

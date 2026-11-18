@@ -616,6 +616,22 @@ func refundWithdrawalGas(input *string) *string {
 	return nil
 }
 
+// settleWithdrawalReceipt settles an ETH withdrawal confirmSpend closed on its
+// inclusion proof (CONFIRM-RECEIPT-CAP-1) from its own receipt:
+// {"block_height":H,"tx_index":I,"receipt_proof":"<base64>"}, where it mined.
+// A reverted receipt refunds the value; either status settles the gas.
+// Permissionless.
+//
+//go:wasmexport settleWithdrawalReceipt
+func settleWithdrawalReceipt(input *string) *string {
+	var p mapping.SettleWithdrawalReceiptParams
+	unmarshalParams(input, &p)
+	if err := mapping.HandleSettleWithdrawalReceipt(&p); err != nil {
+		ce.CustomAbort(ce.WrapContractError(ce.ErrInput, err))
+	}
+	return nil
+}
+
 //go:wasmexport transfer
 func transfer(input *string) *string {
 	var params mapping.TransferParams
