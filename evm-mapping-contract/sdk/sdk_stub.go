@@ -353,6 +353,16 @@ func TestStateGet(key string) (string, bool) { v, ok := testState[key]; return v
 // TestStateLen returns the number of stored state keys.
 func TestStateLen() int { return len(testState) }
 
+// TestStateCopy returns a copy of the whole contract state, for comparing what
+// two call sequences leave behind.
+func TestStateCopy() map[string]string {
+	out := make(map[string]string, len(testState))
+	for k, v := range testState {
+		out[k] = v
+	}
+	return out
+}
+
 // ResetTestStateStore is a compatibility alias for the review-5 (pentest)
 // test files, which predate the review2 harness naming. Both clear the same
 // in-memory store, so it forwards to ResetTestState.

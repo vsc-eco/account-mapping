@@ -166,6 +166,14 @@ const ProofFeePrefix = "pf-"
 const GasSettlePrefix = "gs" + DirPathDelimiter
 const GasSettleListKey = "gsl"
 
+// InclusionClosePrefix (CONFIRM-RECEIPT-CAP-1): an ETH withdrawal closed on its
+// inclusion proof alone (its receipt did not fit the node's payload cap) is
+// kept until settleWithdrawalReceipt settles it from that receipt:
+// wic-{L1 block}-{tx index}. Keyed by where it mined, which no other
+// withdrawal shares (nonces restart with each generation). No list: whoever
+// closed it knows where it mined.
+const InclusionClosePrefix = "wic" + DirPathDelimiter
+
 // Kept beside a pending withdrawal, not in it, so the withdrawal record (and
 // unmapETH's RC, near the 10k limit Altera sends) does not grow: gx-{nonce}
 // is the gas a fee bump drew from the reserve on top of the prepaid fee,
