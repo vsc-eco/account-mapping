@@ -123,6 +123,41 @@ func TestA01_FoldLegacyKey(t *testing.T) {
 	if FoldLegacyKeyIfNeeded(true) {
 		t.Fatal("fold over a populated registry")
 	}
+
+	// The same as a later call sees it (nothing memoized yet, the registry only
+	// in state), and an undecodable registry: never folded over, left as it was.
+	for name, raw := range map[string]string{
+		"populated":   string(MarshalVaultRegistry(VaultRegistry{{Generation: 3, Predecessor: 3, Status: VaultStatusPending}})),
+		"undecodable": "\x01\x02\x03",
+	} {
+		sdk.ResetTestState()
+		sdk.StateSetObject(constants.VaultRegistryKey, raw)
+		sdk.StubSetTssKeyFor("primary", "active,"+testPub1+",ecdsa")
+		sdk.StateSetObject(constants.VaultCheckedKey, testPub1)
+		if FoldLegacyKeyIfNeeded(true) {
+			t.Fatalf("fold over a %s registry read from state", name)
+		}
+		if got, _ := sdk.TestStateGet(constants.VaultRegistryKey); got != raw {
+			t.Fatalf("%s registry changed by the fold check", name)
+		}
+	}
+
+	// An empty registry memoized earlier in the call, then a registry in state
+	// (as a nested call that folded would leave it): not folded over.
+	sdk.ResetTestState()
+	sdk.StubSetTssKeyFor("primary", "active,"+testPub1+",ecdsa")
+	sdk.StateSetObject(constants.VaultCheckedKey, testPub1)
+	if vaults, _, _, _ := LoadVaultState(); len(vaults) != 0 {
+		t.Fatalf("empty state read %+v", vaults)
+	}
+	other := string(MarshalVaultRegistry(VaultRegistry{{Generation: 3, Predecessor: 3, Status: VaultStatusPending}}))
+	sdk.StateSetObject(constants.VaultRegistryKey, other)
+	if FoldLegacyKeyIfNeeded(true) {
+		t.Fatal("folded over a registry written after an empty one was memoized")
+	}
+	if got, _ := sdk.TestStateGet(constants.VaultRegistryKey); got != other {
+		t.Fatal("registry changed by the fold check")
+	}
 }
 
 func TestA01_GenAddressAndFundHoldingSet(t *testing.T) {
