@@ -206,10 +206,17 @@ func tssKeyPub(name string, statuses ...string) (CompressedPubKey, bool) {
 // registry, so a contract upgraded in place can never mint a divergent
 // generation 0.
 func FoldLegacyKeyIfNeeded(allowPending bool) bool {
-	if m := vaultStateMemo; m != nil && len(m.vaults) > 0 {
-		return false
-	}
-	if len(stateBytes(constants.VaultRegistryKey)) > 0 {
+	// REGISTRY-RC-GROWTH-1: with nothing memoized yet (the usual case: the fold
+	// runs first in a handler) the check goes through LoadVaultState, so the
+	// registry is read once per call instead of here and again in the handler
+	// (every call paid each generation's 91 bytes twice). An empty memo is not
+	// trusted: state is read as before, since a nested call may have folded
+	// meanwhile. An undecodable registry is never folded over.
+	if m := vaultStateMemo; m != nil {
+		if len(m.vaults) > 0 || len(stateBytes(constants.VaultRegistryKey)) > 0 {
+			return false
+		}
+	} else if vaults, _, _, err := LoadVaultState(); err != nil || len(vaults) > 0 {
 		return false
 	}
 	pub, ok := tssKeyPub(constants.VaultKeyBaseName, "active", "deprecated")
