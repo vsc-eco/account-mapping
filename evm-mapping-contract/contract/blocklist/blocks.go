@@ -1,32 +1,16 @@
 package blocklist
 
 import (
-	"encoding/hex"
-	"errors"
 	"strconv"
-	"strings"
 
 	"evm-mapping-contract/contract/constants"
 	ce "evm-mapping-contract/contract/contracterrors"
-	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/sdk"
 )
 
-// keccak256Hex returns the lowercase hex-encoded keccak256 of data.
-// Used by HandleAddBlocks for parent-hash chain validation
-// (pentest finding EVM-C2).
-func keccak256Hex(data []byte) string {
-	h := crypto.Keccak256(data)
-	return hex.EncodeToString(h)
-}
-
-// equalHex compares two hex strings case-insensitively, ignoring
-// an optional leading "0x" on either side.
-func equalHex(a, b string) bool {
-	a = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(a)), "0x")
-	b = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(b)), "0x")
-	return a == b
-}
+// review6 H2: keccak256Hex / equalHex (added by main for the oracle-path
+// parent-hash chain check in HandleAddBlocks) are removed alongside that
+// handler — the ZK verifier now owns header-chain validation.
 
 // EthBlockHeader — W4 Cluster B CRIT #6 Site 4 (LOCKED W1 §AH + W1 §BL):
 //   - Added `ChainId uint64` field (appended at the END, after Timestamp).
@@ -124,11 +108,6 @@ func DeserializeHeader(data string) (*EthBlockHeader, error) {
 	return h, nil
 }
 
-func StoreHeader(header EthBlockHeader) {
-	key := constants.BlockPrefix + strconv.FormatUint(header.BlockNumber, 10)
-	sdk.StateSetObject(key, header.Serialize())
-}
-
 func GetHeader(blockNumber uint64) *EthBlockHeader {
 	key := constants.BlockPrefix + strconv.FormatUint(blockNumber, 10)
 	data := readState(key)
@@ -140,11 +119,6 @@ func GetHeader(blockNumber uint64) *EthBlockHeader {
 		return nil
 	}
 	return h
-}
-
-func DeleteHeader(blockNumber uint64) {
-	key := constants.BlockPrefix + strconv.FormatUint(blockNumber, 10)
-	sdk.StateDeleteObject(key)
 }
 
 func GetLastHeight() uint64 {
@@ -159,148 +133,65 @@ func GetLastHeight() uint64 {
 	return h
 }
 
-// readState reads from the ZK verifier contract if configured, otherwise from own state.
-// When a verifier contract ID is set, block headers come from the ZK-verified store.
-// Falls back to own state for backward compatibility with the oracle BLS path.
+// readState reads block-header state from the configured ZK header verifier
+// contract.
+//
+// review6 H2: the prior implementation fell back to own state when no
+// verifier was configured ("oracle-trusted" legacy path). That path let a
+// designated oracle account write arbitrary StateRoot / TransactionsRoot /
+// ReceiptsRoot / BaseFeePerGas with no cryptographic anchoring — every
+// finding in the audit's "forged header composes into…" chain (H10, H9,
+// X3, L1) reduced to "oracle key compromise" through this fallback.
+//
+// The fallback is removed: headers MUST come from the ZK verifier. If
+// VerifierContractIdKey is unset OR the verifier returns nothing, GetHeader
+// / GetLastHeight return nil/0 — every consumer (deposit verify, withdrawal
+// fee computation, drop-proof binding) already gracefully handles missing
+// headers by aborting the operation with "no block headers available". The
+// contract simply refuses to process bridge operations until a ZK verifier
+// is wired up, which is the desired safety posture.
 func readState(key string) *string {
 	vcid := sdk.StateGetObject(constants.VerifierContractIdKey)
-	if vcid != nil && *vcid != "" {
-		result := sdk.ContractStateGet(*vcid, key)
-		if result == nil || *result == "" {
-			return nil
-		}
-		return result
+	if vcid == nil || *vcid == "" {
+		return nil
 	}
-	return sdk.StateGetObject(key)
-}
-
-func SetLastHeight(height uint64) {
-	sdk.StateSetObject(constants.LastHeightKey, strconv.FormatUint(height, 10))
-}
-
-type AddBlocksParams struct {
-	Blocks    []AddBlockEntry `json:"blocks"`
-	LatestFee uint64          `json:"latest_fee"`
-}
-
-// AddBlockEntry — W4 Cluster B CRIT #6 Site 4 (legacy-oracle-path schema):
-// extended with `ChainId` so the operator-fed addBlocks/replaceBlock calls
-// (kept during the ZK verifier ramp-up window) can populate the new field.
-// In steady state, headers come from the ZK verifier (no AddBlockEntry path
-// involved); during the ramp-up window, the operator MUST supply chainId
-// matching the contract's configured chainId() — HandleAddBlocks validates
-// this before any StoreHeader, so a mismatched-chain operator submission
-// is rejected at ingestion (defense-in-depth in case the operator wires
-// the wrong ETH RPC).
-type AddBlockEntry struct {
-	BlockNumber      uint64 `json:"block_number"`
-	// ParentHash is the keccak256 of the previous tip header's
-	// Serialize() output. Required on every non-seed entry —
-	// HandleAddBlocks rejects entries whose parent_hash doesn't
-	// match the stored previous tip's hash. See pentest finding
-	// EVM-C2.
-	ParentHash       string `json:"parent_hash"`
-	StateRoot        string `json:"state_root"`
-	TransactionsRoot string `json:"transactions_root"`
-	ReceiptsRoot     string `json:"receipts_root"`
-	BaseFeePerGas    uint64 `json:"base_fee_per_gas"`
-	GasLimit         uint64 `json:"gas_limit"`
-	Timestamp        uint64 `json:"timestamp"`
-	ChainId          uint64 `json:"chain_id"`
-}
-
-// HandleAddBlocks — W4 Cluster B Site 4: chainId now populates the
-// EthBlockHeader.ChainId field on every stored header. Caller (main.go's
-// addBlocks wasmexport) must pass the contract's configured chainId so
-// HandleAddBlocks can validate `entry.ChainId == expectedChainId` before
-// any StoreHeader. Pre-fix, headers stored under the legacy oracle path
-// had no chainId binding; an operator wiring the wrong RPC would silently
-// populate the bridge with cross-chain headers.
-func HandleAddBlocks(params *AddBlocksParams, expectedChainId uint64) error {
-	lastHeight := GetLastHeight()
-
-	if lastHeight == 0 {
-		return ce.NewContractError(ce.ErrInitialization, "contract not seeded: call seedBlocks first")
+	result := sdk.ContractStateGet(*vcid, key)
+	if result == nil || *result == "" {
+		return nil
 	}
-
-	for _, entry := range params.Blocks {
-		if entry.BlockNumber != lastHeight+1 {
-			return ce.NewContractError(ce.ErrInput, "block heights must be sequential")
-		}
-
-		// W4 Cluster B Site 4: chainId guard. Reject any entry whose chainId
-		// does not match the contract's expected chainId. expectedChainId=0
-		// (uninitialized) is also a reject — the contract MUST be configured
-		// before legacy-oracle blocks can be ingested.
-		if expectedChainId == 0 {
-			return errors.New("contract chainId not configured; cannot ingest headers")
-		}
-		if entry.ChainId != expectedChainId {
-			return errors.New("entry chain_id does not match contract chain_id")
-		}
-
-		// EVM-C2: chain-link validation. Each entry's parent_hash
-		// must equal keccak256(serialize(prev tip)). Without this
-		// check, the contract stores oracle-supplied headers
-		// verbatim — a 2/3 BLS-quorum compromise (or any single
-		// oracle that can produce one fake header) can fork the
-		// chain in this contract's view.
-		prev := GetHeader(lastHeight)
-		if prev == nil {
-			return errors.New("previous tip header missing")
-		}
-		expectedParent := keccak256Hex([]byte(prev.Serialize()))
-		if !equalHex(entry.ParentHash, expectedParent) {
-			return errors.New("parent_hash mismatch: header does not chain to previous tip")
-		}
-
-		stateRoot, err := hexTo32(entry.StateRoot)
-		if err != nil {
-			return ce.WrapContractError(ce.ErrInvalidHex, err, "state_root")
-		}
-		txRoot, err := hexTo32(entry.TransactionsRoot)
-		if err != nil {
-			return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
-		}
-		rcptRoot, err := hexTo32(entry.ReceiptsRoot)
-		if err != nil {
-			return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
-		}
-
-		header := EthBlockHeader{
-			BlockNumber:      entry.BlockNumber,
-			StateRoot:        stateRoot,
-			TransactionsRoot: txRoot,
-			ReceiptsRoot:     rcptRoot,
-			BaseFeePerGas:    entry.BaseFeePerGas,
-			GasLimit:         entry.GasLimit,
-			Timestamp:        entry.Timestamp,
-			ChainId:          entry.ChainId,
-		}
-
-		StoreHeader(header)
-		lastHeight = entry.BlockNumber
-
-		// Prune old headers
-		if entry.BlockNumber > constants.MaxBlockRetention {
-			pruneHeight := entry.BlockNumber - constants.MaxBlockRetention
-			DeleteHeader(pruneHeight)
-		}
-	}
-
-	SetLastHeight(lastHeight)
-	return nil
+	return result
 }
 
-func hexTo32(s string) ([32]byte, error) {
-	var result [32]byte
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 32 {
-		return result, ce.NewContractError(ce.ErrInvalidHex, "invalid 32-byte hex")
-	}
-	copy(result[:], b)
-	return result, nil
-}
+// review6 H2 + MED M23-F5 (#31) — single source of truth for header state.
+//
+// AddBlockEntry / AddBlocksParams / HandleAddBlocks / HandleSeedBlock /
+// HandleReplaceBlock have been REMOVED. Headers are now sourced EXCLUSIVELY
+// from the configured ZK header-verifier contract (readState routes through
+// VerifierContractIdKey). Any path that lets the operator (or an oracle
+// account) write headers directly into this contract's state is by definition
+// an unbacked-mint surface: the audit's H2 finding showed that forged
+// StateRoot / ReceiptsRoot / BaseFeePerGas composes into H10, H9, X3, L1 —
+// every "this proof verifies against the stored root" check becomes a
+// tautology under operator/oracle compromise.
+//
+// M23-F5 (#31): the local-state WRITERS StoreHeader / SetLastHeight /
+// DeleteHeader have ALSO been removed. GetHeader / GetLastHeight read via
+// readState (the VERIFIER's b-{height} / h keys); a local StateSetObject /
+// StateDeleteObject on BlockPrefix / LastHeightKey therefore targets a
+// DIFFERENT key namespace than the readers ever consult — silently shadowed
+// once a verifier is configured, exactly the divergent-lastHeight drift class
+// M23-F5 / F-M22-MED-1 (#29) flag. They were dead code (no caller in this
+// module; the ZK header verifier is a SEPARATE Go module that only MIRRORS
+// this layout — it does NOT import this package, so the prior "retained for
+// the verifier" rationale was incorrect). Removing them leaves the verifier
+// as the single source of truth with no shadow writer that can ever diverge.
+// The codec (Serialize / DeserializeHeader) is retained for the documented
+// cross-module layout parity; it writes no state and so cannot drift.
+//
+// If a future operational need for an emergency local-state write arises
+// (e.g. fork recovery without re-deploying), the only acceptable path is
+// to re-add a wasmexport that takes a fresh ZK proof + verifies it inline
+// — never a bare operator-signed header.
 
 func appendUint64(buf []byte, v uint64) []byte {
 	return append(buf,
@@ -316,114 +207,4 @@ func readUint64(buf []byte, offset *int) uint64 {
 		uint64(buf[*offset+6])<<8 | uint64(buf[*offset+7])
 	*offset += 8
 	return v
-}
-
-// HandleSeedBlock — W4 Cluster B Site 4: chainId is required on seed.
-func HandleSeedBlock(entry *AddBlockEntry, expectedChainId uint64) error {
-	if entry.BlockNumber == 0 {
-		return ce.NewContractError(ce.ErrInput, "seed block_number must be > 0")
-	}
-	if expectedChainId == 0 {
-		return errors.New("contract chainId not configured; cannot seed")
-	}
-	if entry.ChainId != expectedChainId {
-		return errors.New("seed chain_id does not match contract chain_id")
-	}
-	txRoot, err := hexTo32(entry.TransactionsRoot)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
-	}
-	rcptRoot, err := hexTo32(entry.ReceiptsRoot)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
-	}
-	header := EthBlockHeader{
-		BlockNumber:      entry.BlockNumber,
-		TransactionsRoot: txRoot,
-		ReceiptsRoot:     rcptRoot,
-		BaseFeePerGas:    entry.BaseFeePerGas,
-		GasLimit:         entry.GasLimit,
-		Timestamp:        entry.Timestamp,
-		ChainId:          entry.ChainId,
-	}
-	StoreHeader(header)
-	SetLastHeight(entry.BlockNumber)
-	return nil
-}
-
-// HandleReplaceBlock — W4 Cluster B Site 4 + W4 Cluster C HIGH #9 / HIGH #35:
-//   - chainId on the replacement entry MUST match the existing stored
-//     header's ChainId. Pre-fix, replaceBlock could silently mutate the
-//     chainId of an in-place header — replaceBlock is an emergency-only
-//     admin operation but a chainId pivot via this path is precisely the
-//     CRIT #6 attack class.
-//   - Reject if either the existing or the new ChainId is 0 (defense
-//     against an unconfigured contract).
-//   - HIGH #9 / HIGH #35 (M9/INV-29): after rewriting the header at the
-//     target height, delete the observed-list state key for that height.
-//     The observed list at `o-{height}` is keyed by (txHash, index) which
-//     validated against the OLD ReceiptsRoot. Replacing the header changes
-//     ReceiptsRoot, so prior observed entries are now binding against a
-//     trie root that the new header no longer commits to. Leaving the
-//     entries stale causes one of two bugs:
-//     (a) a real deposit at the rewritten height fails with
-//     ErrAlreadyObserved against a no-longer-valid prior entry, or
-//     (b) the prior observed entry locks in a deposit that the NEW
-//     ReceiptsRoot would have rejected as invalid.
-//     The observed entries for a block are coalesced under one state key
-//     (mapping/observed.go: `o-{height}` -> concatenated 34-byte entries),
-//     so a single StateDeleteObject deletes them all. Any subsequent
-//     deposit at this height must re-prove against the new header.
-//     KeyDiff includes Deletions (host-runtime guarantees the delete is
-//     part of the same atomic write set as StoreHeader).
-func HandleReplaceBlock(entry *AddBlockEntry, expectedChainId uint64) error {
-	existing := GetHeader(entry.BlockNumber)
-	if existing == nil {
-		return ce.NewContractError(ce.ErrStateAccess, "block not found for replacement")
-	}
-	if expectedChainId == 0 {
-		return errors.New("contract chainId not configured; cannot replace")
-	}
-	if entry.ChainId != expectedChainId {
-		return errors.New("replacement chain_id does not match contract chain_id")
-	}
-	if existing.ChainId != 0 && existing.ChainId != entry.ChainId {
-		return errors.New("replacement chain_id does not match existing header chain_id")
-	}
-
-	stateRoot, err := hexTo32(entry.StateRoot)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "state_root")
-	}
-	txRoot, err := hexTo32(entry.TransactionsRoot)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "transactions_root")
-	}
-	rcptRoot, err := hexTo32(entry.ReceiptsRoot)
-	if err != nil {
-		return ce.WrapContractError(ce.ErrInvalidHex, err, "receipts_root")
-	}
-
-	header := EthBlockHeader{
-		BlockNumber:      entry.BlockNumber,
-		StateRoot:        stateRoot,
-		TransactionsRoot: txRoot,
-		ReceiptsRoot:     rcptRoot,
-		BaseFeePerGas:    entry.BaseFeePerGas,
-		GasLimit:         entry.GasLimit,
-		Timestamp:        entry.Timestamp,
-		ChainId:          entry.ChainId,
-	}
-
-	StoreHeader(header)
-
-	// HIGH #9 / HIGH #35: invalidate observed entries at the rewritten
-	// height. The key format mirrors mapping/observed.go::observedKey:
-	// constants.ObservedBlockPrefix + strconv.FormatUint(height, 10).
-	// We construct the key directly here rather than importing the mapping
-	// package (blocklist must not depend on mapping — mapping already
-	// imports blocklist).
-	observedKey := constants.ObservedBlockPrefix + strconv.FormatUint(entry.BlockNumber, 10)
-	sdk.StateDeleteObject(observedKey)
-	return nil
 }

@@ -79,16 +79,6 @@ func cryptoKeccak256(hexData *string) *string
 //go:wasmimport sdk crypto.ecrecover
 func cryptoEcrecover(hashHex *string, sigHex *string) *string
 
-// CRIT #11 site 4 — explicit-name wasmimports paired with the host-side
-// `ecrecover_strict` / `ecrecover_canonical` registered in
-// modules/wasm/sdk/sdk.go. New contracts that want the strict (REJECT)
-// or canonical (NORMALIZE) policy by name import these.
-//go:wasmimport sdk crypto.ecrecover_strict
-func cryptoEcrecoverStrict(hashHex *string, sigHex *string) *string
-
-//go:wasmimport sdk crypto.ecrecover_canonical
-func cryptoEcrecoverCanonical(hashHex *string, sigHex *string) *string
-
 //go:wasmimport sdk crypto.rlp_decode
 func cryptoRlpDecode(hexData *string) *string
 
@@ -97,3 +87,7 @@ func abort(msg, file *string, line, column *int32)
 
 //go:wasmimport env revert
 func revert(msg, symbol *string)
+
+// OnTestReset is the test harness hook (sdk_stub.go); in wasm every call
+// starts a fresh instance, so there is nothing to reset.
+func OnTestReset(func()) {}

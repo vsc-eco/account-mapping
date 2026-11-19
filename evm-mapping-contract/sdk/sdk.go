@@ -26,7 +26,20 @@ func StateSetObject(key string, value string) {
 
 // Get a value by key from the contract state
 func StateGetObject(key string) *string {
-	return stateGetObject(&key)
+	// DEVNET-FOUND host-vs-stub fix: the real WASM host returns a non-nil EMPTY
+	// string for an ABSENT key (execution-context GetState -> Ok("") when the
+	// store has no value), whereas the unit-test stub returns nil. Contracts are
+	// written + unit-tested against nil-for-absent, so a bare `!= nil` presence
+	// check (e.g. IsObserved) reads TRUE for every unset key, and an
+	// `if data == nil { return DEFAULT }` getter (e.g. chainId's default 1) never
+	// returns its non-zero default. Normalize "" -> nil so every nil-check
+	// behaves as written. The contract never stores an intentional empty value
+	// (verified: no StateSetObject(k,"")), so this is lossless.
+	v := stateGetObject(&key)
+	if v == nil || *v == "" {
+		return nil
+	}
+	return v
 }
 
 // Delete or unset a value by key in the contract state
@@ -41,7 +54,12 @@ func EphemStateSetObject(key string, value string) {
 
 // Get a value by key from the ephemeral contract state
 func EphemStateGetObject(contractId string, key string) *string {
-	return ephemStateGetObject(&contractId, &key)
+	// Same host-vs-stub "" -> nil normalization as StateGetObject (above).
+	v := ephemStateGetObject(&contractId, &key)
+	if v == nil || *v == "" {
+		return nil
+	}
+	return v
 }
 
 // Delete or unset a value by key in the ephemeral contract state

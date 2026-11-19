@@ -86,12 +86,57 @@ func TestEcrecover(t *testing.T) {
 	}
 }
 
+// C6 / E21: the credited identity is the node's did:pkh:eip155:1: with the
+// EIP-55 address, on every L1 chain.
 func TestAddressToDID(t *testing.T) {
 	addr, _ := HexToAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
-	did := AddressToDID(addr, 1)
-	want := "did:pkh:eip155:1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-	if did != want {
+	want := "did:pkh:eip155:1:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+	if did := AddressToDID(addr); did != want {
 		t.Fatalf("got %s, want %s", did, want)
+	}
+}
+
+// The EIP-55 specification's test vectors.
+func TestChecksumHexMatchesEIP55(t *testing.T) {
+	for _, want := range []string{
+		"0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+		"0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		"0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+		"0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+		"0x52908400098527886E0F7030069857D2E4169EE7",
+		"0x8617E340B3D01FA5F11F306F4090FD50E238070D",
+		"0xde709f2102306220921060314715629080e2fb77",
+		"0x27b1fdb04752bbc536007a920d24acb045561c26",
+	} {
+		addr, err := HexToAddress(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ChecksumHex(addr); got != want {
+			t.Errorf("ChecksumHex = %s, want %s", got, want)
+		}
+	}
+}
+
+// Every casing of a did:pkh:eip155:1 identity is the same key holder and
+// canonicalizes to one string; other identities pass through untouched.
+func TestCanonicalIdentity(t *testing.T) {
+	const canon = "did:pkh:eip155:1:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+	for _, in := range []string{
+		canon,
+		"did:pkh:eip155:1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+		"did:pkh:eip155:1:0XF39FD6E51AAD88F6F4CE6AB8827279CFFFB92266",
+		"DID:PKH:EIP155:1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+		"did:pkh:eip155:1:f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+	} {
+		if got := CanonicalIdentity(in); got != canon {
+			t.Errorf("CanonicalIdentity(%s) = %s, want %s", in, got, canon)
+		}
+	}
+	for _, in := range []string{"hive:alice", "contract:vsc1x", "did:pkh:eip155:11155111:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "did:pkh:eip155:1:0xzz", ""} {
+		if got := CanonicalIdentity(in); got != in {
+			t.Errorf("CanonicalIdentity(%q) = %q, want it unchanged", in, got)
+		}
 	}
 }
 

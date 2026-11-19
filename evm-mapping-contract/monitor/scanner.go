@@ -397,7 +397,12 @@ func (s *Scanner) scanBlock(height uint64) ([]Deposit, error) {
 
 	// ---- ERC-20 path (D-A-2 unchanged) ----
 	if len(erc20DepositHits) > 0 {
-		receipts, err := s.fetchAllReceipts(block.Transactions)
+		// F-MON-4 (MED #58): prefer a single eth_getBlockReceipts round-trip
+		// over N serial eth_getTransactionReceipt calls. On any failure (RPC
+		// lacks the method, count/order mismatch, decode error) this falls
+		// back to the per-tx serial loop, so correctness never depends on the
+		// batch path being available.
+		receipts, err := s.fetchBlockReceipts(height, block.Transactions)
 		if err != nil {
 			return nil, fmt.Errorf("fetch receipts at block %d: %w", height, err)
 		}
@@ -519,6 +524,54 @@ func (s *Scanner) filterLogs(fromBlock, toBlock uint64, tokenAddr, vaultAddr str
 		}
 	}
 	return result, nil
+}
+
+// fetchBlockReceipts fetches every receipt in a block with a single
+// eth_getBlockReceipts round-trip (F-MON-4 / MED #58), eliminating the
+// O(N) serial eth_getTransactionReceipt fan-out that stalled scanning on
+// large or slow blocks. It is strictly an optimisation: on ANY problem with
+// the batch response it falls back to the serial fetchAllReceipts path.
+//
+// Correctness guard: BuildReceiptProof keys the receipt trie by slice
+// position (rlp.EncodeUint64(uint64(i))), so the returned slice MUST be in
+// transaction-index order. eth_getBlockReceipts returns receipts in that
+// order, but we still verify (a) the count matches len(txs) and (b) each
+// receipt's transactionHash matches the block's tx at the same index. A
+// hostile/misordering RPC therefore cannot corrupt the trie root via this
+// fast path — any mismatch forces the serial fallback.
+func (s *Scanner) fetchBlockReceipts(height uint64, txs []struct {
+	Hash  string `json:"hash"`
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Value string `json:"value"`
+	Input string `json:"input"`
+}) ([]*RPCReceipt, error) {
+	blockHex := fmt.Sprintf("0x%x", height)
+	data, err := s.rpcCall("eth_getBlockReceipts", fmt.Sprintf(`"%s"`, blockHex))
+	if err != nil {
+		// RPC lacks eth_getBlockReceipts (-32601) or transient failure:
+		// fall back to the per-tx serial path rather than failing the block.
+		return s.fetchAllReceipts(txs)
+	}
+	var batch []*RPCReceipt
+	if jerr := json.Unmarshal(data, &batch); jerr != nil || batch == nil {
+		return s.fetchAllReceipts(txs)
+	}
+	if len(batch) != len(txs) {
+		// Count mismatch (partial/over-long reply): do not trust it.
+		return s.fetchAllReceipts(txs)
+	}
+	for i := range batch {
+		if batch[i] == nil ||
+			!strings.EqualFold(batch[i].TransactionHash, txs[i].Hash) {
+			// Out-of-order or missing receipt: the slice position would no
+			// longer equal the tx index, which would silently produce a
+			// wrong receipt-trie root. Fall back to the order-preserving
+			// serial path keyed off each tx hash.
+			return s.fetchAllReceipts(txs)
+		}
+	}
+	return batch, nil
 }
 
 func (s *Scanner) fetchAllReceipts(txs []struct {
@@ -650,7 +703,15 @@ func (s *Scanner) rpcCallWithErrCode(method string, params string) (json.RawMess
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	// review6 closure (M58 / F-MON-3): bound the response body so a
+	// malicious or misconfigured ETH RPC can't OOM the monitor with a
+	// giant reply. 64 MiB is well above any legitimate eth_getBlockByNumber
+	// (busy blocks ≈ few MB).
+	const maxRpcRespBytes = 64 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRpcRespBytes))
+	if err != nil {
+		return nil, 0, fmt.Errorf("rpc response read failed: %w", err)
+	}
 
 	var result struct {
 		Result json.RawMessage `json:"result"`

@@ -169,6 +169,29 @@ func decodeLength(data []byte) int {
 	return result
 }
 
+// AsUint64Checked interprets an RLP byte string as a big-endian uint64 like
+// AsUint64, but FAILS instead of silently truncating when the field carries
+// more than 8 significant bytes, or when it is non-canonically encoded with a
+// leading zero byte. MED-27 (M21-15): the plain AsUint64 accumulates only the
+// last 8 bytes of the input, so a forged >8-byte chainId/nonce/v silently
+// drops its high bytes and can be made to alias a legitimate value (e.g. slip
+// past the downstream ChainId == chainId equality check). Security-sensitive
+// integer fields decode through this checked path so an oversized field is
+// rejected rather than wrapped. An empty string decodes to 0 (canonical RLP
+// for a zero integer); a single 0x00 byte is non-canonical and rejected.
+func (item *Item) AsUint64Checked() (uint64, error) {
+	if len(item.Data) == 0 {
+		return 0, nil
+	}
+	if len(item.Data) > 8 {
+		return 0, ErrOversized
+	}
+	if item.Data[0] == 0 {
+		return 0, ErrNonCanonical
+	}
+	return item.AsUint64(), nil
+}
+
 // DataAsUint64 interprets an RLP byte string as a big-endian uint64.
 func (item *Item) AsUint64() uint64 {
 	if item.Data == nil || len(item.Data) == 0 {

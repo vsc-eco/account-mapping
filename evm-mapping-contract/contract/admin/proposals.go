@@ -37,7 +37,7 @@ import (
 // (monotonic counter, NOT a hash) per v19 §AU.
 type PendingProposal struct {
 	ProposalId   uint64   `json:"proposal_id"`   // v19 §AU — monotonic counter; assigned at propose() time
-	Action       string   `json:"action"`        // handler name, e.g. "setVault"
+	Action       string   `json:"action"`        // handler name, e.g. "setVerifierContract"
 	PayloadHash  [32]byte `json:"payload_hash"`  // keccak256 of the action's input payload bytes
 	Proposer     string   `json:"proposer"`      // hive account that proposed
 	QueueHeight  uint64   `json:"queue_height"`  // block height when proposed
@@ -55,13 +55,13 @@ const (
 	StatusExpired   uint8 = 3
 )
 
-// Timelock windows per W1 §D-C-3 (LOCKED).
-// Hive block cadence is ~3s; 28_800 blocks = 24h; 7_200 = 6h; 400_000 ≈ 14d.
+// Timelock windows per W1 §D-C-3 (LOCKED) are defined in timelock_windows_prod.go
+// (PRODUCTION, untagged: 400K / 28.8K / 7.2K / 0). They are overridden ONLY in a
+// devnet test build via timelock_windows_devnet.go (//go:build devnet_fasttimelock)
+// so setVerifierContract (TimelockLong) can be bootstrapped within a short devnet's
+// block budget. A production build (no tag) ALWAYS uses the LOCKED values; the real
+// timelock is tested separately on the untagged build (W6.3 admin / P2C-1).
 const (
-	TimelockLong        uint64 = 400_000 // Fund-affecting (~14 days)
-	TimelockTactical    uint64 = 28_800  // Operator-tactical (~24 hours)
-	TimelockOperational uint64 = 7_200   // Operational (~6 hours)
-	TimelockImmediate   uint64 = 0       // Emergency: pause / unpause
 	// Auto-expire window: execHeight + 7 days worth of blocks (2 * tactical).
 	// Per §D-C-4 "execHeight + 7 days (auto-expire)".
 	ExpireWindowBlocks uint64 = 201_600 // 7 days at 3s blocks
@@ -70,26 +70,38 @@ const (
 // Action class enumeration (string actions are matched against this set).
 //
 // Per W4 §D-C-8 17-handler migration table:
-//   Fund-affecting (Long, 400K):     setVault, setVerifierContract, createKey, renewKey
-//   Operator-tactical (28.8K, 24h):  registerPublicKey, replaceBlock, replaceWithdrawal, clearNonce
-//   Operational (7.2K, 6h):          registerToken, registerRouter, setGasReserve,
-//                                     seedBlocks, setOracleAccount, registerRelayer,
-//                                     deregisterRelayer, clearTestnetState (Cluster E coord)
-//   Emergency (0):                   pause, unpause
+//   Long (400K):                     setVerifierContract (fund-affecting), createKey
+//                                    (I-14: createKey mints a pending key and moves no funds; the owner's
+//                                    direct createKey export is immediate, as BTC's owner-only createKey;
+//                                    this timelocked route is the optional slow path)
+//   Operator-tactical (28.8K, 24h):  replaceWithdrawal, clearNonce
+//   (setVault and registerPublicKey were removed by A18: the vault is the TSS
+//   primary key's address.)
+//   Operational (7.2K, 6h):          registerToken, registerRouter, setETHGasLimit,
+//                                     registerRelayer, deregisterRelayer,
+//                                     clearTestnetState (Cluster E coord)
+//   Emergency (0):                   pause, unpause, renewKey (D7)
 //
-// addBlocks is EXEMPT (v20 §BD).
+// review6 H2: addBlocks / seedBlocks / setOracleAccount / replaceBlock are
+//   all REMOVED — headers come from the ZK header-verifier contract only.
+//   See blocklist/blocks.go for rationale.
 // setChainId / adminMint are DROPPED (CRIT #6 / CRIT #9 v10).
 func TimelockFor(action string) (uint64, error) {
 	switch action {
-	case "setVault", "setVerifierContract", "createKey", "renewKey":
+	case "setVerifierContract", "createKey":
 		return TimelockLong, nil
-	case "registerPublicKey", "replaceBlock", "replaceWithdrawal", "clearNonce":
+	case "replaceWithdrawal", "clearNonce":
 		return TimelockTactical, nil
-	case "registerToken", "registerRouter", "setGasReserve",
-		"seedBlocks", "setOracleAccount", "registerRelayer",
-		"deregisterRelayer", "clearTestnetState":
+	case "registerToken", "registerRouter", "setETHGasLimit", "setProofFee", "setTokenGasRate",
+		"registerRelayer", "deregisterRelayer", "clearTestnetState", "setMaxWithdrawPerBlock",
+		"setTokenCustody":
 		return TimelockOperational, nil
-	case "pause", "unpause":
+	// D7: renewKey only extends the vault key's life and moves nothing. The
+	// key expires after 365 epochs (~91 days), retires 403,200 blocks after
+	// that and can then never sign again, so a 400K-block timelock left an
+	// owner who started the renewal after expiry ~3,200 blocks to spare. The
+	// BTC mapping contract's renewKey is owner-only and immediate too.
+	case "pause", "unpause", "renewKey", "clearTheftHalt", "setCustodyCheck":
 		return TimelockImmediate, nil
 	default:
 		return 0, errors.New("unknown admin action: " + action)
@@ -273,8 +285,8 @@ func ExpireProposal(id uint64, blockHeight uint64, actor string) error {
 // encoded so wallets / SDKs can hand-construct propose calls without
 // double-JSON-encoding the inner struct. Either field can be empty for
 // no-arg actions (pause/unpause/createKey/renewKey/replaceWithdrawal/
-// clearNonce/seedBlocks-with-default-entry — the empty-payload case is
-// allowed and the hash is keccak256(empty bytes) which is a fixed value).
+// clearNonce — the empty-payload case is allowed and the hash is
+// keccak256(empty bytes) which is a fixed value).
 type ProposeRequest struct {
 	Action     string `json:"action"`
 	PayloadHex string `json:"payload_hex"`
