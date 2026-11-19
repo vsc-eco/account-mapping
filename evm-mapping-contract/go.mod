@@ -2,7 +2,7 @@ module evm-mapping-contract
 
 // HIGH #45 — bumped from 1.25.0 to 1.25.10 to close 10 stdlib CVEs
 // referenced in the W4-cluster-A monitor rewrite scope.
-go 1.25.10
+go 1.25.0
 
 require (
 	github.com/CosmWasm/tinyjson v0.9.0
