@@ -31,10 +31,10 @@ func TestReview2TransferRejectsEmptyRecipient(t *testing.T) {
 	}
 
 	// Sanity: a valid transfer still works (identical both arms).
-	if err := HandleTransfer(&TransferParams{To: "bob", Asset: "eth", Amount: "100"}); err != nil {
+	if err := HandleTransfer(&TransferParams{To: "hive:bob", Asset: "eth", Amount: "100"}); err != nil {
 		t.Fatalf("review2 #43: valid transfer rejected: %v", err)
 	}
-	if got := GetBalance("bob", "eth"); got.Cmp(big.NewInt(100)) != 0 {
+	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(100)) != 0 {
 		t.Fatalf("review2 #43: valid transfer not credited: %s", got)
 	}
 }

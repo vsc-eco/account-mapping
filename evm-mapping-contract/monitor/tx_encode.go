@@ -77,6 +77,14 @@ func EncodeTx(tx *RPCTx) []byte {
 }
 
 func encodeEIP1559Tx(tx *RPCTx) []byte {
+	// F-MON-003 (MED #64): encodeAccessList returns nil when the RPC-supplied
+	// access list exceeds the defensive cap. Propagate nil for the whole tx so
+	// the caller fails safe (tx-trie root mismatch -> proof rejected) instead
+	// of silently emitting a wrong-arity encoding.
+	accessList := encodeAccessList(tx.AccessList)
+	if accessList == nil {
+		return nil
+	}
 	body := rlp.EncodeList(
 		rlp.EncodeUint64(HexToUint(tx.ChainId)),
 		rlp.EncodeUint64(HexToUint(tx.Nonce)),
@@ -86,7 +94,7 @@ func encodeEIP1559Tx(tx *RPCTx) []byte {
 		rlp.EncodeBytes(HexToBytes(tx.To)),
 		encodeBigHex(tx.Value),
 		rlp.EncodeBytes(HexToBytes(tx.Input)),
-		encodeAccessList(tx.AccessList),
+		accessList,
 		encodeBigHex(tx.V),
 		encodeBigHex(tx.R),
 		encodeBigHex(tx.S),
@@ -95,6 +103,12 @@ func encodeEIP1559Tx(tx *RPCTx) []byte {
 }
 
 func encodeAccessListTx(tx *RPCTx) []byte {
+	// F-MON-003 (MED #64): see encodeEIP1559Tx — fail safe to nil if the
+	// access list overflows its defensive cap.
+	accessList := encodeAccessList(tx.AccessList)
+	if accessList == nil {
+		return nil
+	}
 	body := rlp.EncodeList(
 		rlp.EncodeUint64(HexToUint(tx.ChainId)),
 		rlp.EncodeUint64(HexToUint(tx.Nonce)),
@@ -103,7 +117,7 @@ func encodeAccessListTx(tx *RPCTx) []byte {
 		rlp.EncodeBytes(HexToBytes(tx.To)),
 		encodeBigHex(tx.Value),
 		rlp.EncodeBytes(HexToBytes(tx.Input)),
-		encodeAccessList(tx.AccessList),
+		accessList,
 		encodeBigHex(tx.V),
 		encodeBigHex(tx.R),
 		encodeBigHex(tx.S),
@@ -126,6 +140,18 @@ func encodeLegacyTx(tx *RPCTx) []byte {
 }
 
 func encodeBlobTx(tx *RPCTx) []byte {
+	// F-MON-003 (MED #64): reject an RPC-supplied blob-hash list beyond the
+	// protocol bound rather than driving an unbounded make. nil fails safe
+	// (tx-trie root mismatch -> on-chain proof rejected) instead of OOMing.
+	if len(tx.BlobVersionedHashes) > maxBlobHashesPerTx {
+		return nil
+	}
+	// F-MON-003 (MED #64): see encodeEIP1559Tx — fail safe to nil if the
+	// access list overflows its defensive cap.
+	accessList := encodeAccessList(tx.AccessList)
+	if accessList == nil {
+		return nil
+	}
 	blobHashes := make([][]byte, len(tx.BlobVersionedHashes))
 	for i, h := range tx.BlobVersionedHashes {
 		blobHashes[i] = rlp.EncodeBytes(HexToBytes(h))
@@ -139,7 +165,7 @@ func encodeBlobTx(tx *RPCTx) []byte {
 		rlp.EncodeBytes(HexToBytes(tx.To)),
 		encodeBigHex(tx.Value),
 		rlp.EncodeBytes(HexToBytes(tx.Input)),
-		encodeAccessList(tx.AccessList),
+		accessList,
 		encodeBigHex(tx.MaxFeePerBlobGas),
 		rlp.EncodeList(blobHashes...),
 		encodeBigHex(tx.V),
@@ -150,6 +176,18 @@ func encodeBlobTx(tx *RPCTx) []byte {
 }
 
 func encodeSetCodeTx(tx *RPCTx) []byte {
+	// F-MON-003 (MED #64): bound the RPC-supplied authorization list. A
+	// type-4 set-code tx cannot legitimately carry an unbounded list; reject
+	// rather than allocate against attacker-controlled length.
+	if len(tx.AuthorizationList) > maxAuthListEntries {
+		return nil
+	}
+	// F-MON-003 (MED #64): see encodeEIP1559Tx — fail safe to nil if the
+	// access list overflows its defensive cap.
+	accessList := encodeAccessList(tx.AccessList)
+	if accessList == nil {
+		return nil
+	}
 	authItems := make([][]byte, len(tx.AuthorizationList))
 	for i, a := range tx.AuthorizationList {
 		authItems[i] = rlp.EncodeList(
@@ -170,7 +208,7 @@ func encodeSetCodeTx(tx *RPCTx) []byte {
 		rlp.EncodeBytes(HexToBytes(tx.To)),
 		encodeBigHex(tx.Value),
 		rlp.EncodeBytes(HexToBytes(tx.Input)),
-		encodeAccessList(tx.AccessList),
+		accessList,
 		rlp.EncodeList(authItems...),
 		encodeBigHex(tx.V),
 		encodeBigHex(tx.R),
@@ -186,8 +224,18 @@ func encodeAccessList(al []struct {
 	if len(al) == 0 {
 		return rlp.EncodeList()
 	}
+	// F-MON-003 (MED #64): bound the RPC-supplied access list (and each entry's
+	// storage-key list) before driving an unbounded make. nil fails safe: the
+	// tx-trie root will not match block.TransactionsRoot, so the on-chain proof
+	// is rejected rather than the monitor OOMing on an attacker-sized reply.
+	if len(al) > maxAccessListEntries {
+		return nil
+	}
 	items := make([][]byte, len(al))
 	for i, entry := range al {
+		if len(entry.StorageKeys) > maxStorageKeysPerAccessEntry {
+			return nil
+		}
 		keys := make([][]byte, len(entry.StorageKeys))
 		for j, k := range entry.StorageKeys {
 			keys[j] = rlp.EncodeBytes(HexToBytes(k))

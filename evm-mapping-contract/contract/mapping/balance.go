@@ -3,6 +3,7 @@ package mapping
 import (
 	"evm-mapping-contract/contract/constants"
 	ce "evm-mapping-contract/contract/contracterrors"
+	"evm-mapping-contract/contract/crypto"
 	"evm-mapping-contract/sdk"
 	"math/big"
 )
@@ -56,12 +57,23 @@ func safeGasFee(gasUnits, baseFeePerGas, multiplier, gasTipCap uint64) (uint64, 
 	return gasFeeCap, fee, nil
 }
 
+// review6 L1/X3 note: the SafeMul64 / SafeMulUint64 / computeGasFeeCap int64
+// helpers this commit introduced are intentionally omitted on this base. Main
+// already rebuilt all fee arithmetic on *big.Int (see safeGasFee above), which
+// cannot overflow, so the int64 overflow guards the audit asked for are
+// structurally unnecessary here.
+
+// review6 L1/X3 5th-site note: HandleReplaceWithdrawal's 3x re-price (the
+// site the audit's "four sites" list missed) routes through safeGasFee with
+// multiplier=3, so the separate computeReplaceGasFeeCap helper from the
+// adversarial-review commit is unnecessary on this base.
+
 func balanceKey(address, asset string) string {
-	return constants.BalancePrefix + address + constants.DirPathDelimiter + asset
+	return constants.BalancePrefix + crypto.CanonicalIdentity(address) + constants.DirPathDelimiter + asset
 }
 
 func allowanceKey(owner, spender, asset string) string {
-	return constants.AllowancePrefix + owner + constants.DirPathDelimiter + spender + constants.DirPathDelimiter + asset
+	return constants.AllowancePrefix + crypto.CanonicalIdentity(owner) + constants.AllowanceDelimiter + crypto.CanonicalIdentity(spender) + constants.AllowanceDelimiter + asset
 }
 
 // GetBalance returns the caller's ledger balance in the asset's native unit

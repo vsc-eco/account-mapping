@@ -2,11 +2,36 @@ package constants
 
 const DirPathDelimiter = "-"
 
+// ALLOW-1 (allowance key collision), the BTC mapping contract's fix ported:
+// the allowance key joins the owner and spender identities, both of which may
+// contain "-" (Hive usernames allow it). Joined with "-", hive:alice approving
+// the spender "bob-hive:mallory" wrote the key of hive:alice-bob's allowance
+// for hive:mallory, so mallory could spend alice-bob's balance. The owner part
+// is always env.Caller, an authenticated identity, and no identity that can
+// own a balance contains "|", so "|" cannot be forged across owners. Spenders
+// are also checked with sdk.VerifyAddress (mapping/handlers.go).
+const AllowanceDelimiter = "|"
+
 // State key prefixes — mirrors BTC contract pattern
 const (
 	BalancePrefix           = "a" + DirPathDelimiter // a-{address}-{asset} → balance
-	AllowancePrefix         = "q" + DirPathDelimiter // q-{owner}-{spender}-{asset} → allowance
-	ObservedBlockPrefix     = "o" + DirPathDelimiter // o-{height} → observed deposits
+	AllowancePrefix         = "q" + AllowanceDelimiter // q|{owner}|{spender}|{asset} → allowance (ALLOW-1, see AllowanceDelimiter)
+	ObservedBlockPrefix     = "o" + DirPathDelimiter // o-{height}-... → observed deposits
+	// M21-22: per-entry observed keys make IsObserved/MarkObserved O(1) instead
+	// of the previous O(N) blob read-append-rewrite (which was O(N^2) per block
+	// across all deposits in a block, and an unbounded-blob scan reachable by
+	// already-observed-replay spam). Three key families share the "o-" prefix:
+	//   presence (dedup):   o-{height}-{hex(34-byte entry)} → "1"   (O(1) get/set)
+	//   manifest slot:      o-{height}#{seq}                → entry bytes (cleanup)
+	//   manifest length:    oc-{height}                     → decimal count
+	// "#" cannot appear in a decimal height or in lowercase hex, so the presence
+	// and manifest-slot keys never collide. The manifest exists only so the
+	// testnet-only clearTestnetState cleanup can enumerate+delete per-entry keys
+	// (the SDK exposes no prefix-delete / key-iteration primitive). MarkObserved
+	// appends to the manifest by index (write at slot #count, bump count) without
+	// reading prior entries, so MarkObserved is O(1), not O(N).
+	ObservedCountPrefix     = "oc" + DirPathDelimiter // oc-{height} → entry count
+	ObservedSeqDelimiter    = "#"                     // o-{height}#{seq} → manifest slot
 	BlockPrefix             = "b" + DirPathDelimiter // b-{height} → block header data
 	TxSpendsPrefix          = "d" + DirPathDelimiter // d-{nonce} → pending withdrawal
 	SupplyKey               = "s"                    // supply tracking
@@ -14,13 +39,34 @@ const (
 	NonceConfirmedKey       = "n"                    // confirmed nonce
 	NoncePendingKey         = "np"                   // next pending nonce
 	TokenRegistryPrefix     = "t" + DirPathDelimiter // t-{address} → {symbol, decimals}
-	PrimaryPublicKeyKey     = "pubkey"               // TSS primary public key
 	RouterContractIdKey     = "routerid"             // DEX router contract ID
 	PausedKey               = "paused"               // "1" when paused
 	GasReserveKey           = "gr"                   // gas reserve amount (wei — full L1 native precision; big.Int-encoded decimal string)
-	VaultAddressKey         = "vault"                // vault ETH address
+	VaultKeyCacheKey        = "vaultkey"             // A18: "<TSS pubkey hex>|<0x address>", the vault derived from the key
+	VaultCheckedKey         = "vaultok"              // E23: pubkey hex of the primary key whose check signature verified
 	ChainIdKey              = "chainid"              // EVM chain ID
 	VerifierContractIdKey   = "zkverifier"           // ZK header verifier contract ID
+	// MED-33 (M23-F16): block height of the most recent replaceWithdrawal.
+	// HandleReplaceWithdrawal gates on this so an admin (or a compromised
+	// owner key) cannot spam unbounded TSS signing requests by re-issuing
+	// replaceWithdrawal every block — see ReplaceWithdrawalCooldown below.
+	//
+	// round3 C-SM3 (MED-33 follow-up): this is now a PREFIX, keyed per
+	// confirmed-head nonce ("rwlast-{confirmedNonce}"), NOT a single global
+	// key. The prior global key was set but never reset, so its wall-clock
+	// cooldown bled across distinct withdrawal lifecycles — a freshly-stuck
+	// withdrawal could be denied its FIRST fee-bump because an UNRELATED prior
+	// withdrawal replaced recently. Per-nonce keying gives each withdrawal its
+	// own cooldown clock; no reset bookkeeping is needed because the next
+	// withdrawal reads a fresh (empty) key.
+	//
+	// INFO (round4): the OLD global key literal ("rwlast") written by any
+	// pre-round3 deployment is now orphaned — it will never be read or deleted
+	// by any handler. On testnet this is harmless (clearTestnetState does not
+	// enumerate unknown singleton keys). On a fresh mainnet deploy the old key
+	// never exists. No migration action needed; documented here for operator
+	// awareness during any future state migration.
+	ReplaceWithdrawalLastKey = "rwlast" + DirPathDelimiter // rwlast-{confirmedNonce} → last block a replaceWithdrawal ran for that withdrawal
 
 	// W4 Cluster C CRIT #9 (D-C-4 / v20 §BI): propose/execute timelock state.
 	// KeyProposalCounter holds the monotonic uint64 proposal id source.
@@ -34,6 +80,18 @@ const (
 	// W4 Cluster C CRIT #8 native ETH relayer whitelist (S-C-v17-2):
 	// per-relayer entry stored under "rl-{hiveAccountName}" → "1".
 	RelayerRegistryPrefix = "rl" + DirPathDelimiter // rl-{hive_account} → "1"
+
+	// E1 (RV re-verify): NativeAsset is the one asset symbol that is always
+	// valid without a registry entry. AllowedSymbolPrefix+{symbol} is written by
+	// RegisterToken as an O(1) allowlist marker so balance/allowance handlers can
+	// reject free-form asset strings that would inject arbitrary ledger keys.
+	NativeAsset         = "eth"
+	AllowedSymbolPrefix = "as" + DirPathDelimiter // as-{symbol} → "1"
+
+	// M15-N5: TokenSymbolPrefix+{symbol} names the one token a symbol belongs
+	// to ("{chainId}-{address hex}"), so RegisterToken can refuse a second token
+	// under the same ledger symbol.
+	TokenSymbolPrefix = "ts" + DirPathDelimiter // ts-{symbol} → {chainId}-{address hex}
 
 	// W4 Cluster C (v20 §BD): oracle account allowed to call addBlocks
 	// without going through the propose/execute timelock. addBlocks must
@@ -50,11 +108,94 @@ const (
 
 const MaxBlockRetention = 101
 const MaxMPTProofNodes = 20
-const MaxMPTNodeSize = 4096
+// round3 C-RV: the per-node MaxMPTNodeSize=4096 cap was removed in R2-1 (it
+// wrongly rejected large legitimate receipt-trie leaves) and is now deleted as
+// dead code. The real ingress bound is MAX_TX_SIZE=16384 enforced by the
+// transaction-pool in go-vsc-node; the in-contract bound is MaxMPTProofNodes.
+
+// MED-66 (T2-7/CF-EVM-4) site 2: upper bound on the per-deposit instruction
+// list. routeDeposit iterates MapParams.Instructions and string-slices every
+// entry; without a cap an attacker pays dust for a deposit yet attaches a
+// huge instruction array, forcing unbounded per-element CPU work (bounded
+// only by WASM gas). Real routing needs at most a handful of directives
+// (deposit_to / swap_to / asset_out / destination_chain), so 16 is generous
+// headroom. Over the cap routeDeposit skips instruction parsing entirely and
+// credits the depositor's own derived DID.
+const MaxDepositInstructions = 16
+
+// MED-20 (M18-D9): upper bound on a registered token's MinWithdrawal. Without
+// a ceiling the owner could set MinWithdrawal=MaxInt64, which makes every
+// unmap of that token revert at the `amount < tokenInfo.MinWithdrawal` gate —
+// an admin-induced per-token DoS. 1e15 in token-native units is far above any
+// real per-tx minimum (1e9 USDC at 6 decimals) yet leaves headroom below the
+// downstream int64 fee/amount arithmetic.
+const MaxTokenMinWithdrawal = int64(1_000_000_000_000_000)
+
+// MED-21 (M18-D20): max byte length of a token symbol. The registry record is
+// pipe-delimited (`symbol|decimals|minWithdrawal`); an unbounded or
+// pipe-bearing symbol corrupts the positional parse. The length cap bounds
+// the stored record; the `|` rejection (handlers.go RegisterToken) preserves
+// the field structure.
+const MaxTokenSymbolLen = 32
 
 // Gas constants
 const ETHTransferGas = uint64(21_000)
 const ERC20TransferGas = uint64(65_000)
+
+// GLAM-1: the L1 gas limit of an ETH withdrawal. 21,000 pays a transfer to an
+// account that exists. Under Glamsterdam's state-creation pricing (EIP-8037,
+// live on Sepolia since 2026-10-06, mainnet date not set) a transfer that
+// creates its recipient costs far more (eth_estimateGas on Sepolia: 207,391),
+// so at 21,000 it reverts and the fee is lost. An unmap may set gas_limit;
+// otherwise the owner-set default (ETHGasLimitKey, setETHGasLimit) applies,
+// else ETHTransferGas. Self-sends to the vault (drop/roll) stay at 21,000.
+const MaxETHGasLimit uint64 = 1_000_000
+const ETHGasLimitKey = "egl"
+
+// Proving fee. Every deposit and withdrawal needs an L1 header proven on Magi,
+// which the operator buys from the Prover Network. ProofFeePrefix + asset holds
+// that asset's fee in its smallest unit (unset: no fee), set by the owner
+// (setProofFee, operational timelock) since the contract cannot read the PROVE
+// price. A deposit pays it out of its credit, a withdrawal on top of its debit;
+// it goes to ProofFeeRecipient as an ordinary Magi balance.
+const ProofFeePrefix = "pf-"
+
+// EVM-FEE-1: a mined withdrawal whose real gas cost waits for
+// refundWithdrawalGas (mapping/gas_settle.go): gs-{nonce} -> JSON record;
+// GasSettleListKey lists the open ones ('|'-joined nonces) for the bot.
+const GasSettlePrefix = "gs" + DirPathDelimiter
+const GasSettleListKey = "gsl"
+
+// InclusionClosePrefix (CONFIRM-RECEIPT-CAP-1): an ETH withdrawal closed on its
+// inclusion proof alone (its receipt did not fit the node's payload cap) is
+// kept until settleWithdrawalReceipt settles it from that receipt:
+// wic-{L1 block}-{tx index}. Keyed by where it mined, which no other
+// withdrawal shares (nonces restart with each generation). No list: whoever
+// closed it knows where it mined.
+const InclusionClosePrefix = "wic" + DirPathDelimiter
+
+// Kept beside a pending withdrawal, not in it, so the withdrawal record (and
+// unmapETH's RC, near the 10k limit Altera sends) does not grow: gx-{nonce}
+// is the gas a fee bump drew from the reserve on top of the prepaid fee,
+// gt-{nonce} the token an ERC-20 withdrawal paid for its gas. Both are
+// deleted with the pending spend.
+const GasReserveExtraPrefix = "gx" + DirPathDelimiter
+const GasTokenFeePrefix = "gt" + DirPathDelimiter
+const ProofFeeRecipient = "hive:altera.app"
+
+// TokenGasRatePrefix (tgr-{symbol}) is the owner-set price of 1 ETH in a
+// token's smallest units (A11): an ERC-20 withdrawal pays the L1 gas the ETH
+// reserve fronts for it, in the token, to RevertFeeRecipient. Unset: no charge.
+const TokenGasRatePrefix = "tgr" + DirPathDelimiter
+
+// RevertFeeRecipient receives an ERC-20 withdrawal's revert fee (USDC-1): the
+// operator, who pays for the proofs and tops up the ETH gas reserve that paid
+// the reverted transfer's gas (A35: it went to the contract owner).
+const RevertFeeRecipient = ProofFeeRecipient
+
+// TokenGasFeeRecipient receives an ERC-20 withdrawal's gas fee in the token
+// (A11): the operator, who tops up the ETH reserve that paid the gas.
+const TokenGasFeeRecipient = ProofFeeRecipient
 
 // Minimum withdrawal amounts (in token-native units).
 // big.Int/wei migration: native ETH accounting is now full wei (18 decimals),
@@ -62,23 +203,278 @@ const ERC20TransferGas = uint64(65_000)
 // int64) compared against big.Int amounts via big.NewInt at the call site;
 // the unbounded accounting values (balances/supply/amounts) are *big.Int.
 // 0.01 ETH = 10_000_000_000_000_000 wei.
+// MaxPricingHeaderAge (LOW 10): a new withdrawal is priced from the newest L1
+// header only while that header is at most this many seconds older than the L2
+// block time. An hour is ~300 ETH blocks; the 2x base-fee margin covers normal
+// moves over that span, a stalled header feed does not.
+const MaxPricingHeaderAge uint64 = 3600
+
 const MinETHWithdrawal = int64(10_000_000_000_000_000) // 0.01 ETH in WEI
 const MinUSDCWithdrawal = int64(10_000_000)            // 10 USDC in micro-units
+
+// DUST-1: a deposit below a tenth of its asset's minimum withdrawal is never
+// credited: map refuses it and it stays in the vault, as the BTC mapping
+// contract never credits an output under MinDepositSats (1,000 sats, THORChain's
+// BTC dust threshold, ~$1). Each mapped deposit costs the bridge an L2 call, its
+// block's header and possibly a paid proof, and without a floor a 1-wei
+// deposit was credited. ETH: 0.001 ETH; a token: its min_withdrawal / 10 (USDC
+// at 10 USDC: 1 USDC). The bot does not map one either.
+const MinDepositDivisor = 10
+const MinETHDeposit = MinETHWithdrawal / MinDepositDivisor // 0.001 ETH in WEI
 
 // Gas reserve
 const GasReserveDepositTaxBps = int64(100) // 1% of ETH deposits go to gas reserve
 // big.Int/wei migration: the reserve accumulator (GasReserveKey) is denominated
-// in WEI. Operators calling `setGasReserve` MUST pass wei values.
+// in WEI. It is funded only by the proof-backed `to_reserve` deposit
+// instruction and the 1% deposit tax — there is no admin write path.
 // 0.05 ETH = 50_000_000_000_000_000 wei.
 const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum reserve
 
-// W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window.
-// EXPIRY_WINDOW = 5000 Hive blocks ≈ 4 hours (Hive 3s blocks). Any L2 caller
-// can submit `expireWithdrawal` once currentBlock >= pending.BlockHeight +
-// WithdrawalExpiryWindow with an L1-proof-of-drop per D-E-4.
-const WithdrawalExpiryWindow uint64 = 5000
+// W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window. Any
+// L2 caller can submit `expireWithdrawal` once the verified L1 chain
+// (blocklist.GetLastHeight) is WithdrawalExpiryWindow blocks past
+// pending.BlockHeight, with an L1-proof-of-drop per D-E-4.
+//
+// E22: pending.BlockHeight is an L1 height. The window was 5000 "Hive blocks"
+// compared against the Hive height, which is far above any L1 height, so it
+// was always open. It is now 1200 L1 blocks (about 4 hours at 12 s).
+const WithdrawalExpiryWindow uint64 = 1200
+
+// D3: L1 blocks (of the verified header chain) after the withdrawal was queued
+// before anyone may roll it back with rollWithdrawal: 1200 blocks, about 4
+// hours at 12 s. PendingSpend.BlockHeight is an L1 height, so the window is
+// counted in L1 blocks against blocklist.GetLastHeight().
+const WithdrawalRollWindow uint64 = 1200
+
+// MED-33 (M23-F16): minimum number of Hive blocks between two consecutive
+// replaceWithdrawal executions. replaceWithdrawal calls sdk.TssSignKey on
+// every invocation; without a cooldown, repeated execution burns TSS signing
+// resources unbounded (the propose/execute timelock rate-limits the FIRST
+// hop, but once a proposal is executable nothing stopped re-running it). A
+// stuck tx legitimately needs at most one fee-bump per few minutes; 200
+// blocks ≈ 10 minutes at Hive 3s cadence is comfortably above any real
+// re-broadcast cadence while capping the TSS request rate.
+const ReplaceWithdrawalCooldown uint64 = 200
 
 // W4 Cluster E §D-E-8 + Cluster B §BG: chain-gate state key set by
 // initContract when IsTestnet=true. clearTestnetState reads this key and
 // aborts if absent or != "true".
 const IsTestnetKey = "is_testnet"
+
+// RP-11: withdrawals are queued on L2 and only MaxInFlightWithdrawals of them
+// hold a vault nonce (signed, on L1, unconfirmed) at a time. A user's unmap
+// never fails because someone else is withdrawing: it debits and queues; each
+// head close (and drainWithdrawalQueue) moves queued entries into flight.
+// The cap bounds the EVM vault's concurrent TSS sign sessions, which share the
+// signing interval with every other key (the BTC vault's included).
+const (
+	WithdrawQueuePrefix  = "wq" + DirPathDelimiter // wq-{seq} → JSON QueuedWithdrawal
+	WithdrawQueueHeadKey = "wqh"                   // lowest seq that may still be queued
+	WithdrawQueueTailKey = "wqt"                   // next seq to assign
+)
+
+const MaxInFlightWithdrawals uint64 = 8
+
+// MaxQueuedWithdrawals bounds the queue's storage; above it an unmap is refused
+// (the only remaining "busy" refusal, at a depth no normal load reaches). It
+// counts live entries (QueuedLiveKey), not tail-head, which also counts
+// cancelled and issued slots the head has not walked past yet (A12: 1,023
+// enqueue+cancel pairs filled it for ~153 USDC). MaxQueuedPerAccount bounds
+// one account's share (QueuedPerAccountPrefix, wqa-{account}).
+const (
+	MaxQueuedWithdrawals   uint64 = 1024
+	MaxQueuedPerAccount    uint64 = 16
+	QueuedLiveKey                 = "wqn"
+	QueuedPerAccountPrefix        = "wqa" + DirPathDelimiter
+)
+
+// MaxDrainScan bounds how many queue entries one drain inspects, so a long run
+// of entries that cannot be issued yet (fee cap, reserve) stays cheap.
+const MaxDrainScan uint64 = 32
+
+// MaxQueueWalk bounds the queue slots one call reads, removed ones included
+// (advanceQueueHead, the drain scan).
+const MaxQueueWalk uint64 = 64
+
+// DefaultETHFeeCapFloorGwei is the smallest default fee authorization an ETH
+// unmap reserves when the caller sets no max_fee: its gas limit at 20 gwei
+// (420,000 gwei at 21,000 gas). The unused part is refunded when the
+// withdrawal is priced and issued.
+const DefaultETHFeeCapFloorGwei = int64(20)
+
+// USDC-GAS-1: per-token gas limit bounds for registerToken (0 = ERC20TransferGas).
+const (
+	MinTokenGasLimit uint64 = 21_000
+	MaxTokenGasLimit uint64 = 500_000
+)
+
+// A01: vault generations (rolling keys), mirroring the BTC mapping contract's
+// vault rotation. The registry and its counters use the BTC contract's keys and
+// layout, so the node reads both contracts with the same decoder.
+const (
+	// VaultKeyBaseName is generation 0's TSS key name (the bridge's original key);
+	// generation N is VaultKeyBaseName + "v" + N.
+	VaultKeyBaseName = "primary"
+
+	VaultRegistryKey  = "v"  // packed 91-byte entries (whole list)
+	VaultNextGenKey   = "vn" // 4-byte BE: next generation number to mint
+	VaultActiveGenKey = "va" // 4-byte BE: generation receiving deposits
+
+	// VaultAddrCachePrefix caches a generation's L1 address: vac-{gen} → "<pubkey hex>|<0x address>".
+	VaultAddrCachePrefix = "vac" + DirPathDelimiter
+	// DepositContractAttestedPrefix: dca-{gen} -> the L1 height at which the
+	// generation's MagiDeposit was proven to have code (I-28; depositAddress
+	// names a generation's MagiDeposit only once it is set).
+	DepositContractAttestedPrefix = "dca" + DirPathDelimiter
+
+	// VaultBookPrefix is what a SUPERSEDED generation's address holds, per asset:
+	// vb-{gen}-{asset} → wei / token units. The active generation's share is
+	// derived (custody minus the superseded books), so it needs no key.
+	VaultBookPrefix = "vb" + DirPathDelimiter
+
+	// VaultOperatorKey names an optional second account allowed the operational
+	// rotation ops (migrateVault, retireVault, writeOffDust, redriveSweep), as in
+	// the BTC contract. The owner may always call them.
+	VaultOperatorKey = "vaultop"
+)
+
+// VaultPurgeGraceL1Blocks is how long an emptied (Inactive) generation stays
+// deposit-matchable before it may be purged: about 30 days of 12 s Ethereum
+// blocks on mainnet, a few minutes elsewhere. A late deposit inside the window
+// returns the generation to Draining.
+func VaultPurgeGraceL1Blocks(chainId uint64) uint32 {
+	if chainId == 1 {
+		return 216_000
+	}
+	return VaultPurgeReorgL1Blocks
+}
+
+// VaultPurgeReorgL1Blocks is the margin a generation stays empty after its last
+// emptying before a purge (BTC PURGE-GRIEF-1).
+const VaultPurgeReorgL1Blocks uint32 = 64
+
+// VaultPurgeMapWindowL1Blocks (I-26, testnet 11-04) is how far past the grace
+// the stored L1 height must be before a purge, so a deposit mined inside the
+// grace has its header stored and its map in before the generation stops
+// matching: a map needs the deposit's header, which comes with a later proof
+// (finality ~13 min, a proof cycle, the attestation). Live: the proof that let
+// a parked deposit's header be attested also crossed the grace, the purge went
+// out first and 0.02 ETH was stranded. About a day on mainnet; on testnets one
+// more reorg margin, so a rotation still runs end to end.
+func VaultPurgeMapWindowL1Blocks(chainId uint64) uint32 {
+	if chainId == 1 {
+		return 7_200
+	}
+	return VaultPurgeReorgL1Blocks
+}
+
+// TokenSymbolsKey lists every registered token symbol, '|'-joined, so a vault
+// rotation can book each asset a retiring generation holds (A01).
+const TokenSymbolsKey = "tsyms"
+
+// QueuedDebitPrefix is the sum of the queued (not yet issued) withdrawals'
+// debits per asset: wqd-{asset}. The funds are still at the vault, so a
+// rotation books them to the retiring generation. QueuedDebitExactKey is "1"
+// once the counters cover every queued entry. A queue left from before the
+// counters existed is counted a bounded walk at a time (QueuedDebitRecountKey
+// holds "{cursor}|{tail at start}" meanwhile), never by waiting for it to
+// empty.
+const (
+	QueuedDebitPrefix     = "wqd" + DirPathDelimiter
+	QueuedDebitExactKey   = "wqdx"
+	QueuedDebitRecountKey = "wqdr"
+)
+
+// A01 cut-over without a settle wait (ROT-HALT-1). The retiring generation
+// keeps the withdrawal nonces ("n"/"np") until the withdrawals it had in flight
+// settle; WithdrawNonceHolderKey names it meanwhile, then the nonces restart
+// at 0 for the active generation. WithdrawCeilingPrefix (wnc-{gen}) is the
+// first nonce after them: its sweeps start there, and its key signs nothing
+// else below it. ETHSweptPrefix (vse-{gen}) marks a generation whose ETH has
+// been swept from a proven balance, and holds the L1 block of that proof
+// ("1" when written before the block was kept): ETH of one of its withdrawals
+// refunded later, and an ETH deposit mined at or before that block, went with
+// that sweep.
+const (
+	WithdrawNonceHolderKey = "wnh"
+	WithdrawCeilingPrefix  = "wnc" + DirPathDelimiter
+	ETHSweptPrefix         = "vse" + DirPathDelimiter
+)
+
+// Migration sweeps (A01): ms-{gen}-{nonce} → JSON sweep record; MigrationSweepsKey
+// lists the open ones ("{gen}-{nonce}", '|'-joined), which the node scans to
+// scope a retiring key's signatures; msn-{gen} is the next L1 nonce of a
+// retiring generation.
+const (
+	MigrationSweepPrefix = "ms" + DirPathDelimiter
+	MigrationSweepsKey   = "msr"
+	SweepNoncePrefix     = "msn" + DirPathDelimiter
+)
+
+// P2 (BTC-C3 parity, btc-mapping-contract setMaxUnmapPerBlock): the most of
+// one asset that withdrawals may debit in one Hive block. Set per asset by
+// the owner (setMaxWithdrawPerBlock, operational timelock; 0 turns the limit
+// off); unset, the defaults below apply. The BTC contract's default is 1 BTC
+// per block; the ETH default is about the same value, the ERC-20 default is
+// 100,000 whole tokens (about that for a dollar stablecoin; the owner sets
+// other tokens). Tighten as the bridge's value grows; pause is the instant
+// brake.
+const (
+	MaxWithdrawPerBlockPrefix = "mwb" + DirPathDelimiter // mwb-{asset} -> decimal cap ("0": off)
+	WithdrawBlockAccPrefix    = "wba" + DirPathDelimiter // wba-{asset} -> 8-byte Hive block + 32-byte debited, big-endian
+)
+
+var DefaultMaxWithdrawPerBlockETHWei = "25000000000000000000" // 25 ETH
+
+const DefaultMaxWithdrawPerBlockTokens = 100_000 // whole tokens, times 10^decimals
+
+// TheftHaltKey is the EVM bridge's theft flag (P1, BTC parity). The node reads
+// it as the BTC contract's "th": any non-empty value halts this bridge's vault
+// keysigns; cleared only by deletion (clearTheftHalt).
+const TheftHaltKey = "th"
+
+// C2 custody proof (the THORChain solvency check for the EVM bridge's ETH):
+//   - SolvencyHaltKey: set (to the proof's block height) when the proven ETH of
+//     every fund-holding generation, at one stored header, is more than
+//     DefaultCustodyGapWei below the booked custody Supply("eth").Active;
+//     deleted when a later complete proof shows the custody is there. The node
+//     reads any value as a halt of this bridge's vault keysigns, like "th".
+//   - CustodyProofKey: the proof being assembled, "{height}|{gen}:{wei},...":
+//     two mainnet account proofs do not fit one 8 KB call, so each generation
+//     is proven in its own call at the same header.
+//   - CreditedDepositBlockKey: the newest L1 block a credited deposit came
+//     from; a custody proof at an older block would miss it.
+//   - CustodyCheckOffKey: the owner's switch (setCustodyCheck): while set,
+//     custody proofs are refused and no halt is held.
+const (
+	SolvencyHaltKey         = "si"
+	CustodyProofKey         = "cp"
+	CreditedDepositBlockKey = "mdb"
+	CustodyCheckOffKey      = "sio"
+)
+
+// Per-asset custody (C2 for ERC-20s, token_custody.go):
+//   - AssetShortPrefix+{asset}: the block height of the newest complete proof
+//     that found that asset short ("eth" included). "si" is set with the first
+//     short asset and deleted only when no asset is short, so one asset's
+//     proof never lifts another's halt.
+//   - TokenCustodyConfigPrefix+{symbol}: where the token keeps a holder's
+//     balance, "{slot}|{bits}|{gap}" (owner, setTokenCustody).
+//   - TokenCustodyProofPrefix+{symbol}: the token proof being assembled,
+//     "{height}|{storage root hex}|{gen}:{amount},...".
+const (
+	AssetShortPrefix         = "sis" + DirPathDelimiter
+	TokenCustodyConfigPrefix = "tcc" + DirPathDelimiter
+	TokenCustodyProofPrefix  = "tcp" + DirPathDelimiter
+)
+
+// DefaultCustodyGapWei: a shortfall up to this much is not a halt. Booked
+// custody is debited for gas at the estimate before the L1 tx mines and may
+// briefly lag only by the gas of in-flight sweeps (about 216,000 gas for an
+// ETH and three token sweeps: 0.043 ETH at 200 gwei).
+const DefaultCustodyGapWei = "50000000000000000" // 0.05 ETH
+
+// RefundablePrefix + <asset> + "-" + <did:pkh:eip155 account> holds what sendHome may
+// return to that Ethereum address (a deposit that fell back to its sender's own
+// account, a contract's withdrawal for the account that came back).
+const RefundablePrefix = "rf" + DirPathDelimiter

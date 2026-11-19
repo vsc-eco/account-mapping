@@ -1,0 +1,37 @@
+name: ci
+
+# evm-mapping-contract: the Go tests in the production build and in the
+# devnet_fasttimelock build (the devnet test fixture), and the contract wasm
+# built with the tinygo image the Makefile pins by digest. Every action is
+# pinned by commit (a tag can be moved) and the token is read-only.
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  evm-mapping-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: evm-mapping-contract
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: evm-mapping-contract/go.mod
+          cache-dependency-path: evm-mapping-contract/go.sum
+
+      - name: tests (production build)
+        run: go test ./...
+
+      - name: tests (devnet_fasttimelock build)
+        run: go test -tags devnet_fasttimelock ./...
+
+      - name: wasm (tinygo image pinned by digest in the Makefile)
+        run: make build

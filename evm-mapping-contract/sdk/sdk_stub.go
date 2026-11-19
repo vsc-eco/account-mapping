@@ -4,6 +4,9 @@ package sdk
 
 import (
 	"encoding/hex"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"golang.org/x/crypto/sha3"
@@ -12,7 +15,14 @@ import (
 //go:wasmimport sdk console.log
 func log(s *string) *string { return nil }
 
+// testLogs records every Log line (test-only; see TestLogs).
+var testLogs []string
+
+// TestLogs returns the lines logged since the last ResetTestState. Test-only.
+func TestLogs() []string { return append([]string(nil), testLogs...) }
+
 func Log(s string) {
+	testLogs = append(testLogs, s)
 	log(&s)
 }
 
@@ -22,6 +32,8 @@ func Log(s string) {
 // a black hole, getEnv() nil-deref'd). Back them with an in-memory store
 // + settable env so review2 A/B tests can exercise real handler logic.
 // See test helpers (ResetTestState/SetTestCaller/...) at end of file.
+// review6's parallel stub infra (ResetStubState/StubSetEnvJSON) is folded
+// in as aliases over this store — see end of file.
 
 var testState = map[string]string{}
 var testEphem = map[string]string{}
@@ -60,7 +72,40 @@ func getEnvKey(arg *string) *string {
 }
 
 //go:wasmimport sdk system.verify_address
-func verifyAddress(arg *string) *string { return nil }
+func verifyAddress(arg *string) *string {
+	r := stubVerifyAddress(*arg)
+	return &r
+}
+
+// stubHiveName is the node's Hive username rule (go-vsc-node lib/dids hivePattern).
+var stubHiveName = regexp.MustCompile(`^[a-z][0-9a-z\-]*[0-9a-z](\.[a-z][0-9a-z\-]*[0-9a-z])*$`)
+
+// stubVerifyAddress mirrors the node's dids.VerifyAddress (system.verify_address)
+// for the identities this contract handles. The node also base58check-decodes
+// contract ids; the stub only checks their shape.
+func stubVerifyAddress(a string) string {
+	switch {
+	case strings.HasPrefix(a, "did:pkh:eip155:1:"):
+		h := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(a, "did:pkh:eip155:1:"), "0x"), "0X")
+		if _, err := hex.DecodeString(h); err == nil && len(h) == 40 {
+			return "user:evm"
+		}
+	case strings.HasPrefix(a, "hive:"):
+		u := strings.TrimPrefix(a, "hive:")
+		if stubHiveName.MatchString(u) && len(u) >= 3 && len(u) < 17 {
+			return "user:hive"
+		}
+	case strings.HasPrefix(a, "contract:"):
+		if id := strings.TrimPrefix(a, "contract:"); strings.HasPrefix(id, "vsc1") && len(id) == 38 {
+			return "contract"
+		}
+	case strings.HasPrefix(a, "system:"):
+		if len(a) > len("system:") {
+			return "system"
+		}
+	}
+	return "unknown"
+}
 
 //go:wasmimport sdk hive.get_balance
 func getBalance(arg1 *string, arg2 *string) *string { return nil }
@@ -77,25 +122,112 @@ func hiveTransfer(arg1 *string, arg2 *string, arg3 *string) *string { return nil
 //go:wasmimport sdk hive.withdraw
 func hiveWithdraw(arg1 *string, arg2 *string, arg3 *string) *string { return nil }
 
-//go:wasmimport sdk contracts.read
-func contractRead(contractId *string, key *string) *string { return nil }
+// stubContractReadResponder lets tests intercept contracts.read so external
+// contract reads (e.g. blocklist.readState pulling from the ZK header
+// verifier contract) can be mocked. Returning nil emulates "absent".
+var stubContractReadResponder func(contractId, key string) *string
 
-//go:wasmimport sdk contracts.call
+// StubSetContractReadResponder installs the contracts.read hook. Test-only.
+func StubSetContractReadResponder(fn func(contractId, key string) *string) {
+	stubContractReadResponder = fn
+}
+
+func contractRead(contractId *string, key *string) *string {
+	if stubContractReadResponder != nil {
+		return stubContractReadResponder(*contractId, *key)
+	}
+	return nil
+}
+
+// stubContractCallResponder lets tests intercept contracts.call. Returning
+// nil emulates the host returning nil (call failed). Test-only.
+var stubContractCallResponder func(contractId, method, payload string) *string
+
+// StubSetContractCallResponder installs the contracts.call hook. Test-only.
+func StubSetContractCallResponder(fn func(contractId, method, payload string) *string) {
+	stubContractCallResponder = fn
+}
+
 func contractCall(contractId *string, method *string, payload *string, options *string) *string {
+	if stubContractCallResponder != nil {
+		return stubContractCallResponder(*contractId, *method, *payload)
+	}
 	return nil
 }
 
 //go:wasmimport sdk tss_v2.create_key
-func tssCreateKey(keyId *string, algo *string, epochs *string) *string { return nil }
+func tssCreateKey(keyId *string, algo *string, epochs *string) *string {
+	testCreatedKeys = append(testCreatedKeys, *keyId+","+*algo+","+*epochs)
+	r := "created" // the host's answer for a new key
+	return &r
+}
+
+// testCreatedKeys records every tss_v2.create_key call as "id,algo,epochs"
+// (test-only; see TestCreatedKeys).
+var testCreatedKeys []string
+
+// TestCreatedKeys returns the keys requested since the last ResetTestState.
+// Test-only.
+func TestCreatedKeys() []string { return append([]string(nil), testCreatedKeys...) }
 
 //go:wasmimport sdk tss_v2.renew_key
-func tssRenewKey(keyId *string, epochs *string) *string { return nil }
+func tssRenewKey(keyId *string, epochs *string) *string {
+	testRenewedKeys = append(testRenewedKeys, *keyId+","+*epochs)
+	r := "renewed"
+	return &r
+}
+
+// testRenewedKeys records every tss_v2.renew_key call as "id,epochs"
+// (test-only; see TestRenewedKeys).
+var testRenewedKeys []string
+
+// TestRenewedKeys returns the keys renewed since the last ResetTestState.
+// Test-only.
+func TestRenewedKeys() []string { return append([]string(nil), testRenewedKeys...) }
 
 //go:wasmimport sdk tss.sign_key
-func tssSignKey(keyId *string, msgId *string) *string { return nil }
+func tssSignKey(keyId *string, msgId *string) *string {
+	testSignRequests = append(testSignRequests, *keyId+","+*msgId)
+	return nil
+}
+
+// testSignRequests records every tss.sign_key call as "id,msg hex" (test-only;
+// see TestSignRequests).
+var testSignRequests []string
+
+// TestSignRequests returns the signatures requested since the last
+// ResetTestState. Test-only.
+func TestSignRequests() []string { return append([]string(nil), testSignRequests...) }
+
+// stubTssKey is what tss.get_key returns ("status,pubkey,algo"); nil emulates
+// no key. Test-only.
+var stubTssKey *string
+
+// StubSetTssKey sets the tss.get_key response. Test-only.
+func StubSetTssKey(info string) { stubTssKey = &info }
+
+// stubTssKeys answers tss.get_key per key name, ahead of stubTssKey, for tests
+// that hold several vault generations. Test-only.
+var stubTssKeys = map[string]string{}
+
+// StubSetTssKeyFor sets the tss.get_key response for one key name. Test-only.
+func StubSetTssKeyFor(keyId, info string) { stubTssKeys[keyId] = info }
+
+// StubClearTssKeys forgets every tss.get_key response: each key then reads as
+// missing (""), as the host answers for a key it does not know. Test-only.
+func StubClearTssKeys() { stubTssKeys = map[string]string{}; stubTssKey = nil }
 
 //go:wasmimport sdk tss.get_key
-func tssGetKey(keyId *string) *string { return nil }
+func tssGetKey(keyId *string) *string {
+	if v, ok := stubTssKeys[*keyId]; ok {
+		return &v
+	}
+	if stubTssKey != nil {
+		return stubTssKey
+	}
+	none := ""
+	return &none
+}
 
 // var envMap = []string{
 // 	"contract.id",
@@ -139,17 +271,6 @@ func cryptoEcrecover(hashHex *string, sigHex *string) *string {
 	return &addr
 }
 
-// CRIT #11 site 4 — stub-mode shims for the explicit-name host bindings.
-// Behavior equivalence with the wasmimport names is not required for
-// unit-test stubs; mirror the same recovery as cryptoEcrecover.
-func cryptoEcrecoverStrict(hashHex *string, sigHex *string) *string {
-	return cryptoEcrecover(hashHex, sigHex)
-}
-
-func cryptoEcrecoverCanonical(hashHex *string, sigHex *string) *string {
-	return cryptoEcrecover(hashHex, sigHex)
-}
-
 func cryptoRlpDecode(hexData *string) *string { return nil }
 
 //go:wasmimport env abort
@@ -176,9 +297,25 @@ func revert(msg, symbol *string) {
 
 // ---- review2 test harness helpers (non-wasm / !gc.custom build only) ----
 
+// testResetHooks clear per-call caches a contract keeps in package
+// variables: in wasm every call starts a fresh instance, here tests share
+// one process.
+var testResetHooks []func()
+
+// OnTestReset registers f to run on every ResetTestState.
+func OnTestReset(f func()) { testResetHooks = append(testResetHooks, f) }
+
 // ResetTestState clears in-memory contract state and restores the
 // default env. Call at the start of every stateful test.
 func ResetTestState() {
+	for _, f := range testResetHooks {
+		f()
+	}
+	testLogs = nil
+	testCreatedKeys = nil
+	testSignRequests = nil
+	testRenewedKeys = nil
+	stubTssKeys = map[string]string{}
 	testState = map[string]string{}
 	testEphem = map[string]string{}
 	testEnvKeys = map[string]string{}
@@ -191,8 +328,21 @@ func SetTestEnv(caller, sender string) {
 		`","msg.sender":"` + sender + `","msg.required_auths":["` + sender + `"]}`
 }
 
+// SetTestBlockHeight sets block.height in the env of subsequent handler calls
+// (call it after SetTestEnv / SetTestCaller, which rebuild the env).
+func SetTestBlockHeight(h uint64) {
+	testEnvJSON = `{"block.height":` + strconv.FormatUint(h, 10) + `,` + strings.TrimPrefix(testEnvJSON, "{")
+}
+
 // SetTestCaller is shorthand for SetTestEnv(addr, addr).
 func SetTestCaller(addr string) { SetTestEnv(addr, addr) }
+
+// SetTestPostingCaller makes addr the caller and sender of a transaction it
+// signed with posting authority only (no active authority).
+func SetTestPostingCaller(addr string) {
+	testEnvJSON = `{"contract.id":"contract:test","msg.caller":"` + addr +
+		`","msg.sender":"` + addr + `","msg.required_auths":[],"msg.required_posting_auths":["` + addr + `"]}`
+}
 
 // SetTestEnvKey sets a getEnvKey value (e.g. "contract.owner").
 func SetTestEnvKey(key, value string) { testEnvKeys[key] = value }
@@ -203,7 +353,33 @@ func TestStateGet(key string) (string, bool) { v, ok := testState[key]; return v
 // TestStateLen returns the number of stored state keys.
 func TestStateLen() int { return len(testState) }
 
+// TestStateCopy returns a copy of the whole contract state, for comparing what
+// two call sequences leave behind.
+func TestStateCopy() map[string]string {
+	out := make(map[string]string, len(testState))
+	for k, v := range testState {
+		out[k] = v
+	}
+	return out
+}
+
 // ResetTestStateStore is a compatibility alias for the review-5 (pentest)
 // test files, which predate the review2 harness naming. Both clear the same
 // in-memory store, so it forwards to ResetTestState.
 func ResetTestStateStore() { ResetTestState() }
+
+// ResetStubState is a compatibility alias for the review6 test files, which
+// were written against a parallel stub-infra naming (stubStateStore /
+// ResetStubState). It clears the same in-memory store via ResetTestState and
+// additionally resets the contract call/read responders, matching the
+// review6 semantics.
+func ResetStubState() {
+	ResetTestState()
+	stubContractCallResponder = nil
+	stubContractReadResponder = nil
+	stubTssKey = nil
+}
+
+// StubSetEnvJSON installs the JSON blob `getEnv` should return. Test-only.
+// review6 compatibility alias over the review2 harness's testEnvJSON.
+func StubSetEnvJSON(j string) { testEnvJSON = j }

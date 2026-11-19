@@ -9,7 +9,15 @@ TINYJSON		:= tinyjson
 TINYJSON_FLAGS 	:= -snake_case -no_std_marshalers
 CONTRACTS_DIR	:= contract
 
-TINYGO_IMAGE := tinygo/tinygo:0.39.0
+# MED-73 (F1) supply-chain fix: pin the TinyGo build image by immutable content
+# digest, NOT by the mutable `tinygo/tinygo:0.39.0` tag. A Docker Hub tag can be
+# re-pushed by whoever controls the upstream repo (or via a registry
+# compromise), silently swapping the compiler and producing a different
+# (potentially backdoored) contract WASM whose CID no longer matches what was
+# reviewed. Docker enforces the digest after the `@`; the tag is kept for
+# readability only. On any TinyGo upgrade, bump BOTH the tag and the digest
+# together (resolve with: docker buildx imagetools inspect tinygo/tinygo:<tag>).
+TINYGO_IMAGE := tinygo/tinygo:0.39.0@sha256:0e51d243c1b84ec650f2dcd1cce3a09bb09730e1134771aeace2240ade4b32f5
 WORKDIR      := /work
 
 # For each local path in go.work (use/replace directives), add a Docker volume
@@ -23,8 +31,11 @@ GOWORK_EXTRA_MOUNTS := $(if $(wildcard go.work),$(shell \
     [ -d "$$host" ] && printf -- '-v %s:%s ' "$$host" "$$ctr"; \
   done),)
 
+# As the calling user (the files it writes stay theirs), so Go's module and
+# build caches go to /tmp: the image's /go is not writable for that user.
 TINYGO_CMD = docker run --rm \
     -u $(shell id -u):$(shell id -g) \
+    -e HOME=/tmp -e GOPATH=/tmp/go -e GOCACHE=/tmp/gocache \
     $(GOWORK_EXTRA_MOUNTS) \
     -v $(CURDIR):$(WORKDIR) \
     -w $(WORKDIR) \
@@ -112,7 +123,7 @@ tinyjson:
 	# Ensure tinyjson exists \
 	if ! command -v $(TINYJSON) >/dev/null 2>&1; then \
 		echo "tinyjson not found, installing..."; \
-		go install github.com/CosmWasm/tinyjson@latest || \
+		go install github.com/CosmWasm/tinyjson/tinyjson@v0.9.0 || \
 			{ echo "Failed to install tinyjson"; exit 1; }; \
 	fi; \
 	\
