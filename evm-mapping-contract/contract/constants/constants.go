@@ -226,8 +226,12 @@ const MinETHDeposit = MinETHWithdrawal / MinDepositDivisor // 0.001 ETH in WEI
 // big.Int/wei migration: the reserve accumulator (GasReserveKey) is denominated
 // in WEI. It is funded only by the proof-backed `to_reserve` deposit
 // instruction (DEPOSIT-FREE-1: no deposit tax) — there is no admin write path.
-// 0.05 ETH = 50_000_000_000_000_000 wei.
-const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum reserve
+// MinGasReserve is the part of the reserve an ERC-20 withdrawal may not spend,
+// kept for the rotation sweeps' gas (~0.0003 ETH each at 0.6 gwei base; sweeps
+// also check their own gas, migration.go). FLOOR-1 (owner 11-20, "0.05 kinda
+// acts as 0"): 0.05 ETH sat idle; 0.01 ETH still covers ~30 sweeps.
+// 0.01 ETH = 10_000_000_000_000_000 wei.
+const MinGasReserve = int64(10_000_000_000_000_000) // 0.01 ETH in WEI minimum reserve
 
 // W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window. Any
 // L2 caller can submit `expireWithdrawal` once the verified L1 chain
