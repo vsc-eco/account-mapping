@@ -194,17 +194,12 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		if err := checkMinDeposit(constants.NativeAsset, d.amount, constants.MinETHDeposit); err != nil {
 			return err
 		}
-		gasTax := new(big.Int).Div(new(big.Int).Mul(d.amount, big.NewInt(constants.GasReserveDepositTaxBps)), big.NewInt(10000))
-		net := new(big.Int).Sub(d.amount, gasTax)
-		if gasTax.Sign() > 0 {
-			addGasReserve(gasTax)
-		}
-		credited := takeDepositProofFee(constants.NativeAsset, net)
+		credited := d.amount // DEPOSIT-FREE-1: credited in full, no tax or proving fee
 		IncBalance(dest, constants.NativeAsset, credited)
 		if !explicit {
 			markRefundable(dest, constants.NativeAsset, credited)
 		}
-		TrackDeposit(constants.NativeAsset, net, gasTax)
+		TrackDeposit(constants.NativeAsset, d.amount, new(big.Int))
 		targets.book(constants.NativeAsset, d.amount)
 	} else {
 		info := getTokenInfo(chainId, d.token)
@@ -221,7 +216,7 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		if IsObserved(req.BlockHeight, txHash, uint16(j)) {
 			return ErrAlreadyObserved
 		}
-		credited := takeDepositProofFee(info.Symbol, d.amount)
+		credited := d.amount // DEPOSIT-FREE-1: credited in full
 		IncBalance(dest, info.Symbol, credited)
 		if !explicit {
 			markRefundable(dest, info.Symbol, credited)

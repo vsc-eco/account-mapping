@@ -26,8 +26,8 @@ import (
 //     (Σ of all ledger balances; smart contracts count as users).
 //
 //   - Fee — Magi-internal revenue fees ONLY (e.g. a percentage of unmaps).
-//     No such fee exists today, so Fee stays 0. L1 gas and the gas-reserve
-//     deposit tax are NOT Magi fees and never land here.
+//     No such fee exists today, so Fee stays 0. L1 gas is NOT a Magi fee and
+//     never lands here (DEPOSIT-FREE-1 removed the gas-reserve deposit tax).
 //
 // The ETH gas reserve (GasReserveKey) is custody that is neither user- nor
 // fee-attributed, so for "eth": Active == User + Fee + gasReserve. For
@@ -90,9 +90,9 @@ func SetSupply(asset string, s Supply) {
 // cannot overflow, so there is no failure mode and nothing to return.
 //
 // userAmount    — the portion credited to the depositor's ledger balance.
-// reserveAmount — the portion diverted to the gas reserve (the 1% ETH
+// reserveAmount — the portion diverted to the gas reserve (0 since
 //
-//	deposit tax; pass 0 for ERC-20). It stays in custody, so
+//	DEPOSIT-FREE-1: a deposit is credited in full). It stays in custody, so
 //	Active includes it, but it is NOT user-attributed and NOT
 //	a Magi revenue fee — Fee is untouched. The reserve
 //	counter itself is maintained separately (addGasReserve).

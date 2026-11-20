@@ -10,10 +10,10 @@ import (
 	"evm-mapping-contract/sdk"
 )
 
-// The proving fee: a deposit pays it out of its credit and a withdrawal on top
-// of its debit, to hive:altera.app as an ordinary Magi balance. Supply does not
-// move (the recipient's balance is user supply), and an unset fee charges
-// nothing.
+// The proving fee: a withdrawal pays it on top of its debit, to hive:altera.app
+// as an ordinary Magi balance. Supply does not move (the recipient's balance is
+// user supply), and an unset fee charges nothing. Deposits pay nothing
+// (DEPOSIT-FREE-1, deposit_free_test.go).
 
 func feeBalance(asset string) *big.Int { return GetBalance(constants.ProofFeeRecipient, asset) }
 
@@ -23,13 +23,14 @@ func TestPROOFFEE_UnsetChargesNothing(t *testing.T) {
 	if err := mapContract(n, nodes, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(99e16)) != 0 || feeBalance("eth").Sign() != 0 {
-		t.Fatalf("no fee set: hive:bob %s, fee account %s; want 0.99 ETH and nothing", got, feeBalance("eth"))
+	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(1e18)) != 0 || feeBalance("eth").Sign() != 0 {
+		t.Fatalf("no fee set: hive:bob %s, fee account %s; want 1 ETH and nothing", got, feeBalance("eth"))
 	}
 }
 
-// MagiDeposit, ETH and token: the recipient gets the credit less the fee.
-func TestPROOFFEE_ContractDepositsPayTheFee(t *testing.T) {
+// MagiDeposit, ETH and token: with a proving fee set the recipient still gets
+// the whole deposit (DEPOSIT-FREE-1); the fee is a withdrawal charge only.
+func TestPROOFFEE_ContractDepositsPayNoFee(t *testing.T) {
 	w := newRP7World(t)
 	SetProofFee("eth", big.NewInt(1e14))
 	SetProofFee("USDC", big.NewInt(100_000))
@@ -38,42 +39,36 @@ func TestPROOFFEE_ContractDepositsPayTheFee(t *testing.T) {
 	if err := mapContract(n, nodes, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(99e16-1e14)) != 0 || feeBalance("eth").Cmp(big.NewInt(1e14)) != 0 {
-		t.Fatalf("ETH: hive:bob %s, fee account %s; want 0.99 ETH less 1e14 and 1e14", got, feeBalance("eth"))
+	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(1e18)) != 0 || feeBalance("eth").Sign() != 0 {
+		t.Fatalf("ETH: hive:bob %s, fee account %s; want 1 ETH and nothing", got, feeBalance("eth"))
 	}
-	if s := GetSupply("eth"); s.User.Cmp(big.NewInt(99e16)) != 0 {
-		t.Fatalf("ETH user supply %s, want 0.99 ETH (credit + fee)", s.User)
+	if s := GetSupply("eth"); s.User.Cmp(big.NewInt(1e18)) != 0 || s.Active.Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("ETH supply %+v, want 1 ETH user and active", s)
+	}
+	if getGasReserve().Sign() != 0 {
+		t.Fatalf("reserve %s after a deposit, want 0 (no deposit tax)", getGasReserve())
 	}
 	n, _, nodes = w.mine(1, transferLog(rp7USDC, rp7User, rp7Vault, 3_000_000), depositLog(dc, rp7User, rp7USDC, big.NewInt(3_000_000), "hive:bob"))
 	if err := mapContract(n, nodes, 1); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetBalance("hive:bob", "USDC"); got.Cmp(big.NewInt(2_900_000)) != 0 || feeBalance("USDC").Cmp(big.NewInt(100_000)) != 0 {
-		t.Fatalf("USDC: hive:bob %s, fee account %s; want 2900000 and 100000", got, feeBalance("USDC"))
+	if got := GetBalance("hive:bob", "USDC"); got.Cmp(big.NewInt(3_000_000)) != 0 || feeBalance("USDC").Sign() != 0 {
+		t.Fatalf("USDC: hive:bob %s, fee account %s; want 3000000 and nothing", got, feeBalance("USDC"))
 	}
 	if s := GetSupply("USDC"); s.User.Cmp(big.NewInt(3_000_000)) != 0 || s.Active.Cmp(big.NewInt(3_000_000)) != 0 {
 		t.Fatalf("USDC supply %+v, want 3000000 user and active", s)
 	}
 }
 
-func TestPROOFFEE_ERC20DepositPaysTheFee(t *testing.T) {
+func TestPROOFFEE_ERC20DepositPaysNoFee(t *testing.T) {
 	w := newRP7World(t)
 	SetProofFee("USDC", big.NewInt(100_000))
 	n, _, nodes := w.mine(1, transferLog(rp7USDC, rp7User, rp7Vault, 3_000_000))
 	if err := mapERC20B64(n, nodes, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetBalance(crypto.AddressToDID(rp7User), "USDC"); got.Cmp(big.NewInt(2_900_000)) != 0 || feeBalance("USDC").Cmp(big.NewInt(100_000)) != 0 {
-		t.Fatalf("sender %s, fee account %s; want 2900000 and 100000", got, feeBalance("USDC"))
-	}
-}
-
-// A credit smaller than the fee is paid in full as the fee, never a negative credit.
-func TestPROOFFEE_ACreditSmallerThanTheFeeIsAllFee(t *testing.T) {
-	rpBridge(t, big.NewInt(0), "hive:x")
-	SetProofFee("eth", big.NewInt(500))
-	if left := takeDepositProofFee("eth", big.NewInt(300)); left.Sign() != 0 || feeBalance("eth").Cmp(big.NewInt(300)) != 0 {
-		t.Fatalf("credit 300 under a fee of 500: left %s, fee account %s; want 0 and 300", left, feeBalance("eth"))
+	if got := GetBalance(crypto.AddressToDID(rp7User), "USDC"); got.Cmp(big.NewInt(3_000_000)) != 0 || feeBalance("USDC").Sign() != 0 {
+		t.Fatalf("sender %s, fee account %s; want 3000000 and nothing", got, feeBalance("USDC"))
 	}
 }
 

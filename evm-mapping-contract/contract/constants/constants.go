@@ -223,10 +223,9 @@ const MinDepositDivisor = 10
 const MinETHDeposit = MinETHWithdrawal / MinDepositDivisor // 0.001 ETH in WEI
 
 // Gas reserve
-const GasReserveDepositTaxBps = int64(100) // 1% of ETH deposits go to gas reserve
 // big.Int/wei migration: the reserve accumulator (GasReserveKey) is denominated
 // in WEI. It is funded only by the proof-backed `to_reserve` deposit
-// instruction and the 1% deposit tax — there is no admin write path.
+// instruction (DEPOSIT-FREE-1: no deposit tax) — there is no admin write path.
 // 0.05 ETH = 50_000_000_000_000_000 wei.
 const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum reserve
 
