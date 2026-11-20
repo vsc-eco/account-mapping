@@ -33,10 +33,12 @@ func ethInvariant(t *testing.T, label string) {
 	}
 }
 
-// TestSupply_DepositIsCreditedInFull — DEPOSIT-FREE-1: an ETH deposit is
-// credited in full, as on the BTC bridge: Active and User both grow by the
-// whole deposit, Fee stays 0, and the reserve does not move.
-func TestSupply_DepositIsCreditedInFull(t *testing.T) {
+// TestSupply_FullCreditKeepsTheInvariant — the bookkeeping a full-credit ETH
+// deposit does (DEPOSIT-FREE-1): Active and User both grow by the whole
+// deposit, Fee stays 0, the reserve does not move, and the invariant holds.
+// It drives the helpers, not a deposit handler; the handlers' full credit is
+// pinned in deposit_free_test.go, prooffee_test.go and rp7_test.go.
+func TestSupply_FullCreditKeepsTheInvariant(t *testing.T) {
 	sdk.ResetTestStateStore()
 
 	deposit := big.NewInt(1_000_000_000_000_000_000) // 1 ETH in wei

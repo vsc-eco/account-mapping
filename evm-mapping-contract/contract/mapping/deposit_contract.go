@@ -130,8 +130,8 @@ func transferPaysAContractDeposit(logs []ParsedLog, j int, vault [20]byte) bool 
 
 // handleContractDeposit credits a MagiDeposit deposit: the receipt (base64
 // proof against the stored header's receipts root, leaf = the receipt) must
-// hold, at LogIndex, a Deposit log from the vault's MagiDeposit. ETH pays the
-// same reserve share as a plain ETH deposit; a token must be registered and its
+// hold, at LogIndex, a Deposit log from the vault's MagiDeposit. It is credited
+// in full like a plain deposit (DEPOSIT-FREE-1); a token must be registered and its
 // paying Transfer is marked observed too. An invalid recipient is credited to
 // the sender's account (as deposit_to, A5).
 //

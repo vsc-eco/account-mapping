@@ -156,8 +156,8 @@ const ETHGasLimitKey = "egl"
 // which the operator buys from the Prover Network. ProofFeePrefix + asset holds
 // that asset's fee in its smallest unit (unset: no fee), set by the owner
 // (setProofFee, operational timelock) since the contract cannot read the PROVE
-// price. A deposit pays it out of its credit, a withdrawal on top of its debit;
-// it goes to ProofFeeRecipient as an ordinary Magi balance.
+// price. A withdrawal pays it on top of its debit (a deposit pays nothing since
+// DEPOSIT-FREE-1); it goes to ProofFeeRecipient as an ordinary Magi balance.
 const ProofFeePrefix = "pf-"
 
 // EVM-FEE-1: a mined withdrawal whose real gas cost waits for
