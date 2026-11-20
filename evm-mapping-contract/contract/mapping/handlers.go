@@ -125,22 +125,11 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 			return nil
 		}
 
-		// Gas reserve tax: bps of ETH deposits, credited in full wei. big.Int
-		// keeps exact precision (Div truncates toward zero) with no overflow.
-		// Taken off the top BEFORE routing so the credit/swap and the supply
-		// accounting all operate on the same net amount.
-		gasTax := new(big.Int).Div(
-			new(big.Int).Mul(amount, big.NewInt(constants.GasReserveDepositTaxBps)),
-			big.NewInt(10000),
-		)
-		netAmount := new(big.Int).Sub(amount, gasTax)
-		if gasTax.Sign() > 0 {
-			addGasReserve(gasTax)
-		}
-
-		// The proving fee comes out of the credit before routing; netAmount
-		// (credit + fee) is still the user supply this deposit adds.
-		credit := takeDepositProofFee("eth", netAmount)
+		// DEPOSIT-FREE-1: a deposit is credited in full, as on the BTC bridge
+		// (no deposit fee; its fee reserve is funded by explicit top-ups) and
+		// THORChain (fees on outbound only). The gas reserve is funded by
+		// to_reserve deposits; the proving fee is charged on withdrawals.
+		credit := amount
 
 		// MAP-CEI-1: lock the observed slot before routeDeposit calls the DEX
 		// router, so a contract on the router's path that calls map again with
@@ -156,7 +145,7 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		if dest != "" {
 			IncBalance(dest, "eth", credit)
 		}
-		TrackDeposit("eth", netAmount, gasTax)
+		TrackDeposit("eth", amount, new(big.Int))
 		targets.book("eth", amount)
 		return nil
 
@@ -198,7 +187,7 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// require a future depositor-signed mechanism (e.g. a deposit-wrapper
 		// EVM contract that emits an instruction-bearing event).
 		dest := crypto.AddressToDID(sender)
-		credited := takeDepositProofFee(tokenInfo.Symbol, amount)
+		credited := amount // DEPOSIT-FREE-1: credited in full
 		IncBalance(dest, tokenInfo.Symbol, credited)
 		// A plain token transfer carries no instruction (a CEX withdrawal looks like
 		// this): refundable to the address it came from.
@@ -815,8 +804,9 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		// the reserve counter for gas that HAD been spent, overstating the
 		// reserve vs the real vault balance. The reserve/fee is restored
 		// only where nothing was spent — the proven-dropped path
-		// (refundDroppedWithdrawal). Reserve liveness is preserved: the
-		// deposit tax keeps funding it, and dropped-tx restores now work.
+		// (refundDroppedWithdrawal). Reserve liveness: to_reserve top-ups fund
+		// it (DEPOSIT-FREE-1 removed the deposit tax, as the BTC bridge's fee
+		// reserve is funded by top-ups), and dropped-tx restores now work.
 		// big.Int/wei: IncBalance and the supply adds cannot overflow, so the
 		// int64 best-effort/drift-marker path from 30710e4 is unnecessary here.
 		//

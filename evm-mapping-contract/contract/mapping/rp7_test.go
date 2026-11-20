@@ -161,22 +161,22 @@ func TestRP7_TokenDepositCreditsTheRecipientNotTheSender(t *testing.T) {
 	}
 }
 
-func TestRP7_ETHDepositCreditsTheRecipientLessTheReserveShare(t *testing.T) {
+func TestRP7_ETHDepositCreditsTheRecipientInFull(t *testing.T) {
 	w := newRP7World(t)
 	n, _, nodes := w.mine(1, depositLog(DepositContractAddress(rp7Vault), rp7User, [20]byte{}, big.NewInt(1e18), "hive:bob"))
 	if err := mapContract(n, nodes, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(99e16)) != 0 {
-		t.Fatalf("hive:bob has %s wei, want 0.99 ETH (1%% to the reserve, as a plain ETH deposit)", got)
+	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("hive:bob has %s wei, want 1 ETH (DEPOSIT-FREE-1: credited in full)", got)
 	}
-	if getGasReserve().Cmp(big.NewInt(1e16)) != 0 {
-		t.Fatalf("reserve %s, want 0.01 ETH", getGasReserve())
+	if getGasReserve().Sign() != 0 {
+		t.Fatalf("reserve %s, want 0 (no deposit tax)", getGasReserve())
 	}
 	if err := mapContract(n, nodes, 0); err == nil || !strings.Contains(err.Error(), "already processed") {
 		t.Fatalf("the same ETH deposit mapped twice: %v", err)
 	}
-	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(99e16)) != 0 {
+	if got := GetBalance("hive:bob", "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
 		t.Fatalf("hive:bob has %s wei after a repeat map", got)
 	}
 }
@@ -240,8 +240,8 @@ func TestRP7_OnlyThePayingTransferIsTakenFromTheERC20Path(t *testing.T) {
 	if err := mapContract(n, nodes, 0); err != nil {
 		t.Fatal(err)
 	}
-	if GetBalance(crypto.AddressToDID(wallet), "eth").Cmp(big.NewInt(99e16)) != 0 {
-		t.Fatal("an invalid recipient was not credited to the sender")
+	if GetBalance(crypto.AddressToDID(wallet), "eth").Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatal("an invalid recipient was not credited to the sender (in full)")
 	}
 }
 

@@ -31,27 +31,14 @@ func SetProofFee(asset string, fee *big.Int) {
 }
 
 // MaxProofFee is the highest proving fee setProofFee takes for an asset: half
-// its smallest creditable deposit, so a deposit at the floor still credits its
-// sender most of it.
+// its smallest creditable deposit (a bound kept from when deposits paid it;
+// since DEPOSIT-FREE-1 only withdrawals do).
 func MaxProofFee(minDeposit *big.Int) *big.Int {
 	return new(big.Int).Div(minDeposit, big.NewInt(2))
 }
 
-// takeDepositProofFee pays the proving fee out of a deposit's credit to
-// ProofFeeRecipient and returns what is left for the depositor (all of it
-// when the credit is smaller than the fee). Supply is unchanged: the
-// recipient's balance is user supply like any other.
-func takeDepositProofFee(asset string, credit *big.Int) *big.Int {
-	fee := ProofFee(asset)
-	if fee.Cmp(credit) > 0 {
-		fee.Set(credit)
-	}
-	if fee.Sign() > 0 {
-		IncBalance(constants.ProofFeeRecipient, asset, fee)
-		sdk.Log("prooffee|deposit|a=" + asset + "|s=" + fee.String())
-	}
-	return new(big.Int).Sub(credit, fee)
-}
+// DEPOSIT-FREE-1: deposits pay no proving fee (they are credited in full, as
+// on the BTC bridge); the fee is charged on withdrawals only.
 
 // chargeWithdrawalProofFee moves asset's proving fee from payer to
 // ProofFeeRecipient (a Magi transfer; supply is unchanged). The caller checks

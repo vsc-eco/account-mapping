@@ -1065,8 +1065,8 @@ func dispatchAdmin(action string, payload []byte) {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: gas_limit out of range"))
 		}
 		// The token's proving fee stays at most half its minimum deposit, as
-		// setProofFee requires: otherwise raising min_withdrawal, setting a
-		// large fee and lowering it again would let the fee take whole deposits.
+		// setProofFee requires (a bound kept from when deposits paid it; since
+		// DEPOSIT-FREE-1 only withdrawals pay the fee).
 		newFloor := big.NewInt((&mapping.TokenInfo{MinWithdrawal: effMin}).MinDeposit())
 		if mapping.ProofFee(p.Symbol).Cmp(mapping.MaxProofFee(newFloor)) > 0 {
 			ce.CustomAbort(ce.NewContractError(ce.ErrInput, "registerToken: min_withdrawal would put the proving fee above half the minimum deposit; lower the fee first"))
@@ -1161,9 +1161,9 @@ func dispatchAdmin(action string, payload []byte) {
 		sdk.StateSetObject(constants.RouterContractIdKey, string(payload))
 
 	// setGasReserve REMOVED: the gas reserve is now funded exclusively by the
-	// proof-backed `to_reserve` native-ETH deposit instruction (and the 1% ETH
-	// deposit tax), both of which grow Active("eth") in lockstep with the
-	// reserve. A bare admin write could bump the counter without moving Active,
+	// proof-backed `to_reserve` native-ETH deposit instruction, which grows
+	// Active("eth") in lockstep with the reserve (DEPOSIT-FREE-1: there is no
+	// deposit tax any more; deposits are credited in full, as on the BTC bridge). A bare admin write could bump the counter without moving Active,
 	// breaking the Active == User + Fee + reserve invariant — the source of the
 	// TrackReserveSpend divergence. See mapping.HandleMap's to_reserve branch.
 

@@ -156,8 +156,8 @@ const ETHGasLimitKey = "egl"
 // which the operator buys from the Prover Network. ProofFeePrefix + asset holds
 // that asset's fee in its smallest unit (unset: no fee), set by the owner
 // (setProofFee, operational timelock) since the contract cannot read the PROVE
-// price. A deposit pays it out of its credit, a withdrawal on top of its debit;
-// it goes to ProofFeeRecipient as an ordinary Magi balance.
+// price. A withdrawal pays it on top of its debit (a deposit pays nothing since
+// DEPOSIT-FREE-1); it goes to ProofFeeRecipient as an ordinary Magi balance.
 const ProofFeePrefix = "pf-"
 
 // EVM-FEE-1: a mined withdrawal whose real gas cost waits for
@@ -223,12 +223,15 @@ const MinDepositDivisor = 10
 const MinETHDeposit = MinETHWithdrawal / MinDepositDivisor // 0.001 ETH in WEI
 
 // Gas reserve
-const GasReserveDepositTaxBps = int64(100) // 1% of ETH deposits go to gas reserve
 // big.Int/wei migration: the reserve accumulator (GasReserveKey) is denominated
 // in WEI. It is funded only by the proof-backed `to_reserve` deposit
-// instruction and the 1% deposit tax — there is no admin write path.
-// 0.05 ETH = 50_000_000_000_000_000 wei.
-const MinGasReserve = int64(50_000_000_000_000_000) // 0.05 ETH in WEI minimum reserve
+// instruction (DEPOSIT-FREE-1: no deposit tax) — there is no admin write path.
+// MinGasReserve is the part of the reserve an ERC-20 withdrawal may not spend,
+// kept for the rotation sweeps' gas (~0.0003 ETH each at 0.6 gwei base; sweeps
+// also check their own gas, migration.go). FLOOR-1 (owner 11-20, "0.05 kinda
+// acts as 0"): 0.05 ETH sat idle; 0.01 ETH still covers ~30 sweeps.
+// 0.01 ETH = 10_000_000_000_000_000 wei.
+const MinGasReserve = int64(10_000_000_000_000_000) // 0.01 ETH in WEI minimum reserve
 
 // W4 Cluster E CRIT #26 + D-E-3 (LOCKED): withdrawal auto-expiry window. Any
 // L2 caller can submit `expireWithdrawal` once the verified L1 chain

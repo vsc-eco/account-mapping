@@ -33,33 +33,26 @@ func ethInvariant(t *testing.T, label string) {
 	}
 }
 
-// TestSupply_DepositTaxGoesToReserveNotFee — the 1% ETH deposit tax is
-// reserve provisioning, not a Magi fee: Active gets the full deposit, User
-// the net credit, Fee stays 0, and the reserve counter absorbs the tax.
-func TestSupply_DepositTaxGoesToReserveNotFee(t *testing.T) {
+// TestSupply_FullCreditKeepsTheInvariant — the bookkeeping a full-credit ETH
+// deposit does (DEPOSIT-FREE-1): Active and User both grow by the whole
+// deposit, Fee stays 0, the reserve does not move, and the invariant holds.
+// It drives the helpers, not a deposit handler; the handlers' full credit is
+// pinned in deposit_free_test.go, prooffee_test.go and rp7_test.go.
+func TestSupply_FullCreditKeepsTheInvariant(t *testing.T) {
 	sdk.ResetTestStateStore()
 
 	deposit := big.NewInt(1_000_000_000_000_000_000) // 1 ETH in wei
-	gasTax := new(big.Int).Div(
-		new(big.Int).Mul(deposit, big.NewInt(constants.GasReserveDepositTaxBps)),
-		big.NewInt(10000),
-	)
-	userNet := new(big.Int).Sub(deposit, gasTax)
 
 	// Mirror HandleMap's eth deposit accounting.
-	addGasReserve(gasTax)
-	IncBalance("hive:alice", "eth", userNet)
-	TrackDeposit("eth", userNet, gasTax)
+	IncBalance("hive:alice", "eth", deposit)
+	TrackDeposit("eth", deposit, new(big.Int))
 
 	s := GetSupply("eth")
-	if s.Active.Cmp(deposit) != 0 {
-		t.Fatalf("Active must equal the FULL deposit (custody): want %s, got %s", deposit, s.Active)
+	if s.Active.Cmp(deposit) != 0 || s.User.Cmp(deposit) != 0 {
+		t.Fatalf("Active and User must both equal the full deposit: want %s, got %+v", deposit, s)
 	}
-	if s.User.Cmp(userNet) != 0 {
-		t.Fatalf("User must equal the net credit: want %s, got %s", userNet, s.User)
-	}
-	if got := getGasReserve(); got.Cmp(gasTax) != 0 {
-		t.Fatalf("reserve must hold the tax: want %s, got %s", gasTax, got)
+	if got := getGasReserve(); got.Sign() != 0 {
+		t.Fatalf("reserve must not move on a deposit: got %s", got)
 	}
 	ethInvariant(t, "after deposit")
 }
