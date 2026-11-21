@@ -144,6 +144,7 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		dest := routeDeposit(sender, instructions, "eth", credit, chainId)
 		if dest != "" {
 			IncBalance(dest, "eth", credit)
+			logDepositCredit(dest, sender, credit, "eth", req.BlockHeight, uint64(req.TxIndex))
 		}
 		TrackDeposit("eth", amount, new(big.Int))
 		targets.book("eth", amount)
@@ -192,6 +193,7 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// A plain token transfer carries no instruction (a CEX withdrawal looks like
 		// this): refundable to the address it came from.
 		markRefundable(dest, tokenInfo.Symbol, credited)
+		logDepositCredit(dest, sender, credited, tokenInfo.Symbol, req.BlockHeight, uint64(req.TxIndex))
 		TrackDeposit(tokenInfo.Symbol, amount, new(big.Int))
 		targets.book(tokenInfo.Symbol, amount)
 		// CRIT #8 / W4 Cluster A + CRIT #14 logIndex: lock observed slot
