@@ -196,6 +196,7 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		}
 		credited := d.amount // DEPOSIT-FREE-1: credited in full, no tax or proving fee
 		IncBalance(dest, constants.NativeAsset, credited)
+		logDepositCredit(dest, d.sender, credited, constants.NativeAsset, req.BlockHeight, uint64(req.TxIndex))
 		if !explicit {
 			markRefundable(dest, constants.NativeAsset, credited)
 		}
@@ -218,6 +219,7 @@ func handleContractDeposit(req *VerificationRequest, targets *depositTargetSet, 
 		}
 		credited := d.amount // DEPOSIT-FREE-1: credited in full
 		IncBalance(dest, info.Symbol, credited)
+		logDepositCredit(dest, d.sender, credited, info.Symbol, req.BlockHeight, uint64(req.TxIndex))
 		if !explicit {
 			markRefundable(dest, info.Symbol, credited)
 		}
