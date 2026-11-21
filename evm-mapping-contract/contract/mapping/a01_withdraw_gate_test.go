@@ -277,7 +277,7 @@ func TestA01_RefundOfARetiringWithdrawalIsBookedToIt(t *testing.T) {
 	rotatedWithInFlight(t)
 	ps := GetPendingSpend(0)
 	book := VaultBook(0, "eth")
-	refundDroppedWithdrawal(ps)
+	refundDroppedWithdrawal(ps, 1)
 	if got := new(big.Int).Sub(VaultBook(0, "eth"), book); got.Cmp(ps.Amount) != 0 {
 		t.Fatalf("booked %s back to generation 0, want %s", got, ps.Amount)
 	}
@@ -285,7 +285,7 @@ func TestA01_RefundOfARetiringWithdrawalIsBookedToIt(t *testing.T) {
 	ps = GetPendingSpend(0)
 	sdk.StateSetObject(constants.ETHSweptPrefix+"0", "1")
 	book = VaultBook(0, "eth")
-	refundDroppedWithdrawal(ps)
+	refundDroppedWithdrawal(ps, 1)
 	if VaultBook(0, "eth").Cmp(book) != 0 {
 		t.Fatal("ETH booked to generation 0 after its ETH sweep took it")
 	}

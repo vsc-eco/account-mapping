@@ -142,6 +142,13 @@ const MaxTokenSymbolLen = 32
 const ETHTransferGas = uint64(21_000)
 const ERC20TransferGas = uint64(65_000)
 
+// PayoutBaseFeePct is the base fee multiplier, in percent, a payout's gas is
+// charged at (mapping.payoutGasFee): the floor of THORChain's outbound fee
+// multiplier (constants_v1.go MinOutboundFeeMultiplierBasisPoints 15_000).
+// THORChain applies it to the whole observed gas rate; here it covers the base
+// fee rising before inclusion, and the fixed tip is added on top.
+const PayoutBaseFeePct = int64(150)
+
 // GLAM-1: the L1 gas limit of an ETH withdrawal. 21,000 pays a transfer to an
 // account that exists. Under Glamsterdam's state-creation pricing (EIP-8037,
 // live on Sepolia since 2026-10-06, mainnet date not set) a transfer that
@@ -481,3 +488,88 @@ const DefaultCustodyGapWei = "50000000000000000" // 0.05 ETH
 // return to that Ethereum address (a deposit that fell back to its sender's own
 // account, a contract's withdrawal for the account that came back).
 const RefundablePrefix = "rf" + DirPathDelimiter
+
+// OwedHomePrefix + <asset> + "-" + <account> holds the part of the refundable
+// amount that a swap the depositor asked for (a deposit swap that did not run,
+// a contract payout for the account that came back) owes home: the mapping bot
+// sends it back to the address on Ethereum (sendHome with owed=1), as the BTC
+// bot sends a failed swap's refund home. A plain deposit stays refundable but
+// is not owed: it is where its sender put it.
+const OwedHomePrefix = "oh" + DirPathDelimiter
+
+// OwedHomeListKey lists "<asset>|<account>" pairs whose owed-home record
+// sendHome can send, joined by ",", for the bot (as GasSettleListKey lists gas
+// settlements); at most MaxOwedHomeList entries. An entry the account no longer
+// holds is pruned by sendHome owed=1. A record that becomes sendable while the
+// list is full waits in the overflow queue (OwedHomeOverflowPrefix + index,
+// OwedHomeOverflowHeadKey / TailKey) and moves into the list as entries leave
+// it (at most OwedHomeRefillPerExit per exit).
+const OwedHomeListKey = "ohl"
+
+const MaxOwedHomeList = 64
+
+const (
+	OwedHomeOverflowPrefix  = "ohq" + DirPathDelimiter
+	OwedHomeOverflowHeadKey = "ohqh"
+	OwedHomeOverflowTailKey = "ohqt"
+	OwedHomeRefillPerExit   = 4
+	// OwedHomeQueuedMarkPrefix + "<asset>|<account>" marks an entry waiting in
+	// the overflow, so list membership is read from state, not inferred from
+	// today's minimum withdrawal and proof fee (which the owner can change).
+	OwedHomeQueuedMarkPrefix = "ohk" + DirPathDelimiter
+)
+
+// PayoutReturnHoldAccount holds the value of a swap's payout that failed and
+// whose swap back to its Hive sender could not run yet (PAYOUT-1 return hold).
+// No caller can be this account, so only retryPayoutReturn and
+// releasePayoutReturn move it (the BTC bridge's RefundHoldAccount).
+const PayoutReturnHoldAccount = "system:payout-return"
+
+// PayoutReturnPrefix + <id> is one held return (JSON); ids run from
+// PayoutReturnHeadKey (the oldest still held, or beyond) to PayoutReturnTailKey
+// (the next id).
+const (
+	PayoutReturnPrefix  = "phr" + DirPathDelimiter
+	PayoutReturnHeadKey = "phrh"
+	PayoutReturnTailKey = "phrt"
+	// PayoutReturnHeadSkip bounds how many released ids one call steps the
+	// head past.
+	PayoutReturnHeadSkip = 64
+)
+
+// MaxPayoutGasLimit bounds the gas_limit a contract's ETH payout may ask for
+// (a wallet's estimate + 20%). Each in-flight payout has the gas reserve front
+// its signed maximum, so a few payouts at MaxETHGasLimit could tie it up and
+// make every other payout wait. A plain transfer needs 21,000, a new account
+// after Glamsterdam ~207,000, a smart-contract wallet ~30,000-60,000.
+const MaxPayoutGasLimit uint64 = 300_000
+
+// A payout that never reached L1 (its nonce was spent by a roll) is sent again
+// to the same address, its gas paid by the reserve, at most MaxPayoutAttempts
+// sends in all (THORChain LackSigning reschedules up to MaxOutboundAttempts,
+// then swaps back). A held return's swap back keeps the swap's own floor for
+// PayoutFloorFor seconds, then drops 5% a day (nothing waits forever).
+const (
+	MaxPayoutAttempts = 3
+	PayoutFloorFor    = 24 * 60 * 60
+	// PayoutFloorDays: after the first day the floor drops by 1/PayoutFloorDays
+	// (5%) a day, so after PayoutFloorDays more days it is gone.
+	PayoutFloorDays = 20
+)
+
+// OwedHomeHoldAccount holds what is owed home to Ethereum addresses (a swap
+// paid from Ethereum that did not complete, or its payout that came back),
+// recorded per address under OwedHomePrefix: never in the address's Magi
+// balance. No caller can be this account; only sendHome owed=1 moves it, to
+// the address it is owed to.
+const OwedHomeHoldAccount = "system:owed-home"
+
+// OwedHomeRevertPrefix + <asset> + "-" + <account> counts the owed sends to
+// that address that reverted on Ethereum (a blacklisted USDC holder, a
+// contract that refuses ETH). From MaxOwedHomeReverts on, the record stays
+// held but leaves the bot's list, so the keeper does not burn its value in gas
+// on sends that cannot land; sendHome owed=1 can still be called by hand.
+const (
+	OwedHomeRevertPrefix = "ohr" + DirPathDelimiter
+	MaxOwedHomeReverts   = 2
+)

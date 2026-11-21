@@ -133,6 +133,12 @@ type PendingSpend struct {
 	// RefundTo: where a refund goes when a contract withdrew for a user
 	// (QueuedWithdrawal.RefundTo); empty = From.
 	RefundTo string `json:"refund_to,omitempty"`
+	// ReturnAsset: a revert swaps the refund back to this Hive asset and sends
+	// it to RefundTo on Hive (refundRevertedWithdrawal). Payouts only.
+	ReturnAsset string `json:"return_asset,omitempty"`
+	// ReturnMin: the least of ReturnAsset a refund of the whole Amount must
+	// swap back to (scaled to the refund).
+	ReturnMin *big.Int `json:"return_min,omitempty"`
 	// GasCost is the gas-reserve amount (full wei) deducted when this
 	// withdrawal was submitted. Refunded by HandleConfirmSpend's failure
 	// branch (pentest finding EVM-C4). *big.Int + omitempty so ETH paths
@@ -150,6 +156,10 @@ type PendingSpend struct {
 	// for a token, GLAM-1 for ETH; 0 = ERC20TransferGas / ETHTransferGas);
 	// replaceWithdrawal reuses it.
 	GasLimit uint64 `json:"gas_limit,omitempty"`
+	// OPTION-2: a contract's payout (Payout) that a roll keeps from L1 is sent
+	// again (Attempt counts its earlier sends).
+	Payout  bool  `json:"payout,omitempty"`
+	Attempt uint8 `json:"attempt,omitempty"`
 }
 
 func StorePendingSpend(ps PendingSpend) {

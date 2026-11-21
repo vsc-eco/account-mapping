@@ -32,7 +32,7 @@ func TestA8_SwapForwardsTheDepositorsMinAmountOut(t *testing.T) {
 			ok := `{"ok":true,"result":"{}"}`
 			return &ok
 		})
-		dest := routeDeposit(sender, c.instr, "eth", big.NewInt(1000), 1)
+		dest, _ := routeDeposit(sender, c.instr, "eth", big.NewInt(1000), 1)
 		if !swap {
 			if sent != "" || dest == "" {
 				t.Errorf("%v: a swap without min_amount_out reached the router (%q) or was not credited (dest %q)", c.instr, sent, dest)

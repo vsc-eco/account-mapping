@@ -46,6 +46,17 @@ type TransferParams struct {
 	// user keeps the money theirs (THORChain's refund address, Across's
 	// depositor).
 	RefundTo string `json:"refund_to,omitempty"`
+	// ReturnAsset (with a hive: refund_to, contract callers only) is the
+	// HIVE or HBD the payout's swap was paid with from Hive. If the L1 transfer
+	// reverts, the refund is swapped back to it and sent to refund_to on Hive
+	// (THORChain's reverse swap of a failed outbound), not credited to a Magi
+	// balance.
+	ReturnAsset string `json:"return_asset,omitempty"`
+	// ReturnMin (with return_asset) is the least of it, in its base units, the
+	// whole withdrawal must swap back to (the swap's own rate less a
+	// tolerance): the swap back runs at a time any relayer picks, so without a
+	// floor it could be sandwiched. Scaled to what is refunded.
+	ReturnMin string `json:"return_min,omitempty"`
 }
 
 type AllowanceParams struct {
@@ -298,6 +309,20 @@ type QueuedWithdrawal struct {
 	// RefundTo: where refunds go when a contract withdrew for a user (see
 	// TransferParams.RefundTo); empty = From.
 	RefundTo string `json:"refund_to,omitempty"`
+	// Payout marks a withdrawal a contract requested (a router swap's payout)
+	// or the sendHome of what a swap owes home: funds of a user who may not
+	// hold a Magi balance at all. Its gas is charged at the expected cost and
+	// never refunded (THORChain's outbound fee; payoutGasFee), and nothing
+	// about its price refunds it: when it cannot be sent it waits in the queue
+	// and is sent when it can (THORChain retries an outbound until it goes out,
+	// LackSigning). A pause still refuses it (THORChain refunds an inbound
+	// during a halt).
+	Payout bool `json:"payout,omitempty"`
+	// ReturnAsset, ReturnMin: TransferParams', carried into the pending spend.
+	ReturnAsset string   `json:"return_asset,omitempty"`
+	ReturnMin   *big.Int `json:"return_min,omitempty"`
+	// Attempt counts this payout's earlier sends (a roll sends it again).
+	Attempt uint8 `json:"attempt,omitempty"`
 }
 
 // refundAccount is where q's refunds go and whose queue slots it uses.

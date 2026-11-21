@@ -85,8 +85,9 @@ func TestMAPCEI1_ARouterReenteringMapCannotCreditTheDepositTwice(t *testing.T) {
 		t.Fatalf("router called %d times, want once", calls)
 	}
 	// The whole 1 ETH is user supply once (DEPOSIT-FREE-1). The stub router
-	// reported success but took nothing: that part goes back to the depositor
-	// (refundable), never staying on the bridge's own account.
+	// reported success but took nothing: that part is held and owed home to the
+	// depositor (PAYOUT-1: never its Magi balance), never staying on the
+	// bridge's own account.
 	if s := GetSupply("eth"); s.User.Cmp(big.NewInt(1e18)) != 0 {
 		t.Fatalf("user supply %s after one 1 ETH deposit, want 1 ETH", s.User)
 	}
@@ -99,10 +100,13 @@ func TestMAPCEI1_ARouterReenteringMapCannotCreditTheDepositTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	depositor := crypto.AddressToDID(sender)
-	if got := GetBalance(depositor, "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
-		t.Fatalf("depositor %s holds %s, want the deposit's 1 ETH once", depositor, got)
+	if got := GetBalance(depositor, "eth"); got.Sign() != 0 {
+		t.Fatalf("depositor %s holds %s on Magi, want 0 (held, owed home)", depositor, got)
 	}
-	if got := getRefundable(depositor, "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
-		t.Fatalf("refundable %s, want 1 ETH", got)
+	if got := GetBalance(constants.OwedHomeHoldAccount, "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("held %s, want the deposit's 1 ETH once", got)
+	}
+	if got := getOwedHome(depositor, "eth"); got.Cmp(big.NewInt(1e18)) != 0 {
+		t.Fatalf("owed home %s, want 1 ETH", got)
 	}
 }

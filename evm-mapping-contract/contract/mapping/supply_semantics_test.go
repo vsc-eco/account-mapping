@@ -108,7 +108,7 @@ func TestSupply_UnmapRoundtrips(t *testing.T) {
 		seed()
 		refundDroppedWithdrawal(&PendingSpend{
 			Amount: value, From: "hive:alice", Asset: "eth", GasCost: fee,
-		})
+		}, 1)
 		ethInvariant(t, "after dropped refund")
 		// E9 (RV re-verify): the only drop proof the verifier accepts is Type-A
 		// (mined, reverted) — the tx mined and the L1 gas was genuinely paid, so

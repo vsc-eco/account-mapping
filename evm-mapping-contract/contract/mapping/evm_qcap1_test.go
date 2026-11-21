@@ -173,8 +173,10 @@ func TestEVMQCAP1_BalanceShortOfTheRiseRefunds(t *testing.T) {
 	}
 }
 
-// A contract's withdrawal (refund_to) is never charged later: a rise refunds it.
-func TestEVMQCAP1_ContractWithdrawalRiseRefunds(t *testing.T) {
+// A contract's withdrawal (a payout) queued while the new generation cannot pay
+// it waits through a fee rise and is sent at the new price (PAYOUT-1, owner
+// 11-21: wait and retry); it is never refunded to a Magi balance for its price.
+func TestEVMQCAP1_ContractWithdrawalWaitsThroughAFeeRise(t *testing.T) {
 	rpBridge(t, new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18)), "hive:alice")
 	a01Rotated(t)
 	IncBalance("contract:router", "eth", new(big.Int).Mul(big.NewInt(3), big.NewInt(1e18)))
@@ -184,22 +186,22 @@ func TestEVMQCAP1_ContractWithdrawalRiseRefunds(t *testing.T) {
 	setVaultBook(0, "eth", new(big.Int).Set(GetSupply("eth").Active))
 	sdk.StubSetEnvJSON(`{"contract.id":"contract:test","msg.caller":"contract:router","msg.sender":"hive:alice",` +
 		`"msg.required_auths":["hive:alice"],"block.timestamp":"2026-10-27T12:00:01"}`)
-	routerStart := GetBalance("contract:router", "eth")
 	aliceStart := GetBalance("hive:alice", "eth")
-	qcQueue(t, TransferParams{RefundTo: "hive:alice"})
-	head, _ := QueueBounds()
-	if q := GetQueued(head); q == nil || q.ChargeRise {
-		t.Fatalf("contract withdrawal queued as %+v, want ChargeRise false", q)
+	p := TransferParams{Amount: "1000000000000000000", To: qcTo, Asset: "eth", DeductFee: true, RefundTo: "hive:alice"}
+	if status, err := HandleUnmapETH(&p, [20]byte{1}, 1); err != nil || !strings.HasPrefix(status, "queued:") {
+		t.Fatalf("contract unmapETH during the rotation: %q %v, want queued", status, err)
 	}
-	debit := new(big.Int).Sub(routerStart, GetBalance("contract:router", "eth"))
 	qcBaseFee(1_500_000_000)
 	qcCover()
-	if n := DrainWithdrawalQueue(1, 8); n != 0 || QueueLen() != 0 {
-		t.Fatalf("issued %d, queue %d; want refunded", n, QueueLen())
+	if n := DrainWithdrawalQueue(1, 8); n != 1 || QueueLen() != 0 {
+		t.Fatalf("issued %d, queue %d; want it sent at the new price", n, QueueLen())
 	}
-	refunded := new(big.Int).Sub(GetBalance("hive:alice", "eth"), aliceStart)
-	if want := new(big.Int).Sub(debit, ProofFee("eth")); refunded.Cmp(want) != 0 {
-		t.Fatalf("refund_to got %s, want the debit %s", refunded, want)
+	ps := GetPendingSpend(0)
+	if fee := payoutGasFee(constants.ETHTransferGas, 1_500_000_000, 2_000_000_000); new(big.Int).Sub(big.NewInt(1e18), ps.Amount).Cmp(fee) != 0 {
+		t.Fatalf("sent %s, want 1 ETH less the payout fee at 1.5 gwei (%s)", ps.Amount, fee)
+	}
+	if GetBalance("hive:alice", "eth").Cmp(aliceStart) != 0 {
+		t.Fatal("refund_to was credited")
 	}
 }
 
