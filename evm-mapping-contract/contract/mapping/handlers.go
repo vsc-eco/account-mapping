@@ -141,9 +141,13 @@ func handleMap(params *MapParams, vaultAddress [20]byte, chainId uint64) error {
 		// Honor the depositor-signed instructions: deposit_to redirect, or a
 		// swap_to/asset_out DEX swap. routeDeposit returns the L2 destination,
 		// or "" when it dispatched the swap (which already credited the funds).
-		dest := routeDeposit(sender, instructions, "eth", credit, chainId)
+		dest, held := routeDeposit(sender, instructions, "eth", credit, chainId)
 		if dest != "" {
-			IncBalance(dest, "eth", credit)
+			if held {
+				IncBalance(constants.OwedHomeHoldAccount, "eth", credit)
+			} else {
+				IncBalance(dest, "eth", credit)
+			}
 			logDepositCredit(dest, sender, credit, "eth", req.BlockHeight, uint64(req.TxIndex))
 		}
 		TrackDeposit("eth", amount, new(big.Int))
@@ -220,13 +224,14 @@ func checkMinDeposit(asset string, amount *big.Int, min int64) error {
 }
 
 func HandleUnmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
-	return unmapETH(params, vaultAddress, chainId, "")
+	return unmapETH(params, vaultAddress, chainId, "", false)
 }
 
 // unmapETH is HandleUnmapETH. home is set only by HandleSendHome: the debited account is
 // then that Ethereum address's own account (not the caller), the destination its
 // own address, and the amount at most what was recorded as refundable.
-func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string) (string, error) {
+// owedHome: the sendHome of what a swap owes home (a payout).
+func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string, owedHome bool) (string, error) {
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
@@ -243,7 +248,9 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 	if !ok || amount.Sign() <= 0 {
 		return "", ce.NewContractError(ce.ErrInput, "invalid amount")
 	}
-	if amount.Cmp(big.NewInt(constants.MinETHWithdrawal)) < 0 {
+	// An owed refund goes home whatever its size, once it pays its own fees
+	// (THORChain's refund rule): the minimum is for withdrawals people make.
+	if amount.Cmp(big.NewInt(constants.MinETHWithdrawal)) < 0 && !owedHome && home != constants.PayoutReturnHoldAccount {
 		return "", ce.NewContractError(ce.ErrIntent, "below minimum ETH withdrawal")
 	}
 	toAddr, err := crypto.HexToAddress(params.To)
@@ -262,6 +269,9 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 		return "", err
 	}
 	gas, err := ethGasLimit(params.GasLimit)
+	if err == nil && params.GasLimit > constants.MaxPayoutGasLimit && isPayout(env, home, owedHome) {
+		err = ce.NewContractError(ce.ErrInput, "a payout's gas_limit must be at most "+strconv.FormatUint(constants.MaxPayoutGasLimit, 10))
+	}
 	if err != nil {
 		return "", err
 	}
@@ -269,17 +279,43 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 	if err != nil {
 		return "", err
 	}
-	if err := failFastOverCap(gas, feeCap); err != nil {
+	payout := isPayout(env, home, owedHome)
+	returnMin, err := checkReturnAsset(payout && (home == "" || home == constants.PayoutReturnHoldAccount), params.RefundTo, params.ReturnAsset, params.ReturnMin)
+	if err != nil {
 		return "", err
 	}
-	// Expected to issue in this call: set aside the exact fee, so issue refunds
-	// nothing. EVM-QCAP-1: if it is queued after all (A01: the new generation
-	// cannot pay it yet), what the caller authorized stays its limit (MaxFee)
-	// and a fee that rises while it waits is charged at issue (issueQueued).
-	// Stored only when the fee was narrowed: otherwise FeeCap is the limit.
 	var authorized *big.Int
-	if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
-		authorized, feeCap = feeCap, fee
+	exactOnTop := false
+	if payout {
+		// A payout pays payoutETHFee when it is issued (now, or later from the
+		// queue), within the caller's max_fee, which stays its only limit. A fee
+		// on top keeps the default cap set aside (a contract is never charged
+		// later, so an exact fee would leave it waiting out any rise); a netted
+		// fee (the router's, sendHome's) only needs the amount to cover it.
+		if params.MaxFee != "" {
+			authorized = new(big.Int).Set(feeCap)
+		}
+		if fee := payoutETHFee(gas, vaultAddress); fee != nil {
+			if fee.Cmp(feeCap) > 0 {
+				return "", ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
+			}
+			if params.DeductFee || QueueLen() == 0 {
+				feeCap = fee // issued in this call at this price: nothing left over
+				exactOnTop = !params.DeductFee
+			}
+		}
+	} else {
+		if err := failFastOverCap(gas, feeCap); err != nil {
+			return "", err
+		}
+		// Expected to issue in this call: set aside the exact fee, so issue refunds
+		// nothing. EVM-QCAP-1: if it is queued after all (A01: the new generation
+		// cannot pay it yet), what the caller authorized stays its limit (MaxFee)
+		// and a fee that rises while it waits is charged at issue (issueQueued).
+		// Stored only when the fee was narrowed: otherwise FeeCap is the limit.
+		if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
+			authorized, feeCap = feeCap, fee
+		}
 	}
 	// The fee is priced when the withdrawal is issued (RP-11); the caller
 	// authorizes up to feeCap and gets the unused part back at issue.
@@ -308,19 +344,29 @@ func unmapETH(params *TransferParams, vaultAddress [20]byte, chainId uint64, hom
 	// Custody and user supply shrink by the full debit now; the unused fee
 	// authorization is booked back at issue, a cancel books back all of it.
 	TrackWithdrawal(constants.NativeAsset, userDebit)
-	return submitWithdrawal(QueuedWithdrawal{
-		From:       caller,
-		To:         params.To,
-		Asset:      constants.NativeAsset,
-		Amount:     amount,
-		Debit:      userDebit,
-		FeeCap:     feeCap,
-		MaxFee:     authorized,
-		ChargeRise: authorized != nil && home == "" && isOwnDirectWithdrawal(env, caller),
-		DeductFee:  params.DeductFee,
-		GasLimit:   gas,
-		RefundTo:   params.RefundTo,
+	status, err := submitWithdrawal(QueuedWithdrawal{
+		From:        caller,
+		To:          params.To,
+		Asset:       constants.NativeAsset,
+		Amount:      amount,
+		Debit:       userDebit,
+		FeeCap:      feeCap,
+		MaxFee:      authorized,
+		ChargeRise:  authorized != nil && home == "" && isOwnDirectWithdrawal(env, caller),
+		DeductFee:   params.DeductFee,
+		GasLimit:    gas,
+		RefundTo:    params.RefundTo,
+		Payout:      payout,
+		ReturnAsset: params.ReturnAsset,
+		ReturnMin:   returnMin,
 	}, vaultAddress, chainId)
+	// A payout with its fee on top set aside exactly this block's fee: queued,
+	// one wei of rise would send it back. Refused instead (nothing is charged);
+	// the caller sends it again.
+	if err == nil && exactOnTop && strings.HasPrefix(status, "queued:") {
+		return "", ce.NewContractError(ce.ErrIntent, "the bridge cannot send this payout now; try again shortly")
+	}
+	return status, err
 }
 
 // isOwnDirectWithdrawal reports whether the debited account is the caller and
@@ -340,10 +386,47 @@ func checkRefundTo(caller, refundTo string) error {
 	if refundTo == "" {
 		return nil
 	}
-	if !strings.HasPrefix(caller, "contract:") {
+	// A held return paid out on Ethereum (releasePayoutReturn with to) keeps
+	// its sender as refund_to, as the router's payout did.
+	if !strings.HasPrefix(caller, "contract:") && caller != constants.PayoutReturnHoldAccount && caller != constants.OwedHomeHoldAccount {
 		return ce.NewContractError(ce.ErrInput, "refund_to is for a contract withdrawing on a user's behalf")
 	}
 	return requireValidRecipient(refundTo)
+}
+
+// checkReturnAsset admits a payout's return_asset and its floor return_min: a
+// contract's withdrawal for a user who paid from Hive (refund_to a hive:
+// account), HIVE or HBD, with a positive floor (a swap back without one could
+// be sandwiched).
+func checkReturnAsset(contractPayout bool, refundTo, returnAsset, returnMin string) (*big.Int, error) {
+	if returnAsset == "" {
+		if returnMin != "" {
+			return nil, ce.NewContractError(ce.ErrInput, "return_min needs return_asset")
+		}
+		return nil, nil
+	}
+	if !contractPayout {
+		return nil, ce.NewContractError(ce.ErrInput, "return_asset is for a contract's withdrawal with a hive: refund_to")
+	}
+	switch {
+	case strings.HasPrefix(refundTo, "hive:"):
+		if returnAsset != "hive" && returnAsset != "hbd" {
+			return nil, ce.NewContractError(ce.ErrInput, "return_asset must be hive or hbd")
+		}
+	case sdk.VerifyAddress(refundTo) == "user:btc":
+		// SENDER-REFUND-1: a swap paid with Bitcoin goes back as BTC to its
+		// sender's Bitcoin address.
+		if returnAsset != "btc" {
+			return nil, ce.NewContractError(ce.ErrInput, "return_asset for a Bitcoin refund_to must be btc")
+		}
+	default:
+		return nil, ce.NewContractError(ce.ErrInput, "return_asset is for a contract's withdrawal with a hive: refund_to")
+	}
+	min, ok := new(big.Int).SetString(returnMin, 10)
+	if !ok || min.Sign() <= 0 {
+		return nil, ce.NewContractError(ce.ErrInput, "return_asset needs a positive return_min")
+	}
+	return min, nil
 }
 
 // errTokenGasLimit refuses gas_limit on a token withdrawal: its gas is paid
@@ -427,13 +510,14 @@ func optionalMaxFee(maxFee string) (*big.Int, error) {
 }
 
 func HandleUnmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64) (string, error) {
-	return unmapERC20(params, vaultAddress, chainId, "")
+	return unmapERC20(params, vaultAddress, chainId, "", false)
 }
 
 // unmapERC20 is HandleUnmapERC20. home is set only by HandleSendHome: the debited account is
 // then that Ethereum address's own account (not the caller), the destination its
 // own address, and the amount at most what was recorded as refundable.
-func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string) (string, error) {
+// owedHome: the sendHome of what a swap owes home (a payout).
+func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, home string, owedHome bool) (string, error) {
 	if isPaused() {
 		return "", ce.NewContractError(ce.ErrIntent, "contract is paused")
 	}
@@ -468,7 +552,7 @@ func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, h
 	if tokenInfo == nil {
 		return "", ErrInvalidToken
 	}
-	if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 {
+	if amount.Cmp(big.NewInt(tokenInfo.MinWithdrawal)) < 0 && !owedHome && home != constants.PayoutReturnHoldAccount {
 		return "", ce.NewContractError(ce.ErrIntent, "below minimum withdrawal for this token")
 	}
 	recipientAddr, err := crypto.HexToAddress(params.To)
@@ -490,7 +574,13 @@ func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, h
 	if err != nil {
 		return "", err
 	}
-	if maxFee != nil {
+	payout := isPayout(env, home, owedHome)
+	returnMin, err := checkReturnAsset(payout && (home == "" || home == constants.PayoutReturnHoldAccount), params.RefundTo, params.ReturnAsset, params.ReturnMin)
+	if err != nil {
+		return "", err
+	}
+	// A payout's gas is checked against max_fee when it is issued, in this call.
+	if maxFee != nil && !payout {
 		if err := failFastOverCap(TokenGasLimit(tokenInfo.GasLimit), maxFee); err != nil {
 			return "", err
 		}
@@ -519,6 +609,9 @@ func unmapERC20(params *TransferParams, vaultAddress [20]byte, chainId uint64, h
 		GasLimit:     tokenInfo.GasLimit,
 		MaxFee:       maxFee,
 		RefundTo:     params.RefundTo,
+		Payout:       payout,
+		ReturnAsset:  params.ReturnAsset,
+		ReturnMin:    returnMin,
 	}, vaultAddress, chainId)
 }
 
@@ -688,7 +781,7 @@ func HandleConfirmSpend(req *ConfirmSpendRequest, chainId uint64) error {
 		if isPaused() {
 			return errRefundWhilePaused
 		}
-		refundDroppedWithdrawal(ps)
+		refundDroppedWithdrawal(ps, chainId)
 		DeletePendingSpend(confirmedNonce)
 		SetConfirmedNonce(confirmedNonce + 1)
 		sdk.Log("withdrawal_lifecycle " + `{"action":"rolledBack","nonce":` + strconv.FormatUint(confirmedNonce, 10) +
@@ -966,7 +1059,10 @@ func hasToReserveInstruction(instructions []string) bool {
 // signed them. ERC-20 no longer calls routeDeposit at all (it settles to the
 // sender's DID) because a Transfer event carries no depositor-signed intent.
 // chainId is threaded so the default DID derives from the deposit chain.
-func routeDeposit(sender [20]byte, instructions []string, asset string, amount *big.Int, chainId uint64) string {
+// held is true when the deposit is owed home (a swap its sender asked for that
+// did not run): the caller credits OwedHomeHoldAccount, not dest, and dest is
+// the address it is owed to (for the deposit log).
+func routeDeposit(sender [20]byte, instructions []string, asset string, amount *big.Int, chainId uint64) (string, bool) {
 	did := crypto.AddressToDID(sender)
 	dest := did
 	explicit := false
@@ -974,12 +1070,20 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 	var minAmountOut *string
 	// A deposit that lands on the depositor's own account by default (no usable
 	// instruction, or a swap that did not run) is refundable: that account has no
-	// RC unless it holds HBD, so sendHome must be able to return it.
-	fallback := func() string {
-		if !explicit {
+	// RC unless it holds HBD, so sendHome must be able to return it. A swap the
+	// depositor asked for (swap_to) that did not run is also owed home: the
+	// mapping bot sends it back to the address (THORChain refundTx).
+	fallback := func() (string, bool) {
+		switch {
+		case explicit:
+		case swapTo != "":
+			resetOwedHomeReverts(dest, asset)
+			recordOwedHome(dest, asset, amount)
+			return dest, true
+		default:
 			markRefundable(dest, asset, amount)
 		}
-		return dest
+		return dest, false
 	}
 
 	// MED-66 (T2-7/CF-EVM-4) site 2: bound the instruction list. Routing needs
@@ -1091,13 +1195,15 @@ func routeDeposit(sender [20]byte, instructions []string, asset string, amount *
 			// A router that reports success but left part of the deposit unpulled:
 			// that part would stay on this contract's own account for good.
 			DecBalance(selfAddr, asset, unspent)
-			IncBalance(dest, asset, unspent)
-			if !explicit {
-				markRefundable(dest, asset, unspent)
+			if explicit {
+				IncBalance(dest, asset, unspent)
+			} else {
+				resetOwedHomeReverts(dest, asset)
+				holdOwedHome(dest, asset, unspent)
 			}
 			sdk.Log("swapleft|t=" + dest + "|a=" + asset + "|d=" + unspent.String())
 		}
-		return ""
+		return "", false
 	}
 
 	return fallback()
@@ -1504,7 +1610,7 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		return err
 	}
 
-	q := QueuedWithdrawal{From: params.From, To: params.To, Amount: amount}
+	q := QueuedWithdrawal{From: params.From, To: params.To, Amount: amount, Payout: isPayout(env, "", false)}
 	userDebit := new(big.Int).Set(amount)
 	if params.Asset != constants.NativeAsset {
 		if params.TokenAddress == "" {
@@ -1539,7 +1645,7 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		if merr != nil {
 			return merr
 		}
-		if maxFee != nil {
+		if maxFee != nil && !q.Payout {
 			if ferr := failFastOverCap(TokenGasLimit(tokenInfo.GasLimit), maxFee); ferr != nil {
 				return ferr
 			}
@@ -1553,21 +1659,42 @@ func unmapFrom(params *TransferParams, vaultAddress [20]byte, chainId uint64, st
 		if gerr != nil {
 			return gerr
 		}
-		feeCap, ferr := ethFeeCap(params.MaxFee, gas)
-		if ferr != nil {
-			return ferr
+		if q.Payout && params.GasLimit > constants.MaxPayoutGasLimit {
+			return ce.NewContractError(ce.ErrInput, "a payout's gas_limit must be at most "+strconv.FormatUint(constants.MaxPayoutGasLimit, 10))
 		}
-		if ferr := failFastOverCap(gas, feeCap); ferr != nil {
-			return ferr
+		feeCap, ffErr := ethFeeCap(params.MaxFee, gas)
+		if ffErr != nil {
+			return ffErr
 		}
-		// EVM-QCAP-1: a narrowed fee keeps the authorized limit as MaxFee. A
-		// spender's withdrawal is never charged later (ChargeRise false): the
-		// owner's allowance covered only this debit, so a fee on top that rose
-		// while it waited is refunded; a netted fee (DeductFee) can rise within
-		// MaxFee.
 		var authorized *big.Int
-		if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
-			authorized, feeCap = feeCap, fee
+		if q.Payout {
+			// A contract spender's withdrawal is a payout (payoutETHFee at issue).
+			if params.MaxFee != "" {
+				authorized = new(big.Int).Set(feeCap)
+			}
+			if fee := payoutETHFee(gas, vaultAddress); fee != nil {
+				if fee.Cmp(feeCap) > 0 {
+					return ce.NewContractError(ce.ErrInput, "fee exceeds max_fee")
+				}
+				// A netted fee is exact; a fee on top keeps its cap (the unused
+				// part goes back at issue), so a rise while it waits within the
+				// cap does not send it back.
+				if params.DeductFee {
+					feeCap = fee
+				}
+			}
+		} else {
+			if ferr := failFastOverCap(gas, feeCap); ferr != nil {
+				return ferr
+			}
+			// EVM-QCAP-1: a narrowed fee keeps the authorized limit as MaxFee. A
+			// spender's withdrawal is never charged later (ChargeRise false): the
+			// owner's allowance covered only this debit, so a fee on top that rose
+			// while it waited is refunded; a netted fee (DeductFee) can rise within
+			// MaxFee.
+			if fee := immediateETHFee(gas, vaultAddress); fee != nil && fee.Cmp(feeCap) < 0 {
+				authorized, feeCap = feeCap, fee
+			}
 		}
 		if params.DeductFee {
 			if amount.Cmp(feeCap) <= 0 {
@@ -1793,29 +1920,32 @@ func HandleReplaceWithdrawal(vaultAddress [20]byte, chainId uint64) error {
 // big.Int/wei: IncBalance and the supply adds cannot overflow, so the
 // refund cannot fail and "state advanced => user was refunded" holds
 // unconditionally (review6 X2's hard-fail guard is unnecessary here).
-func refundDroppedWithdrawal(ps *PendingSpend) {
-	// E9 (RV re-verify): refund the tx VALUE only, NOT the gas.
-	//
-	// Every path that reaches here (clearNonce / cancelMyWithdrawal /
-	// expireWithdrawal) first passes verifyL1ProofOfDrop, and the only proof
-	// type that verifier still accepts is Type-A (reverted_receipt): the tx
-	// MINED and reverted, so the L1 gas was genuinely paid to the miner and that
-	// custody is gone — exactly like HandleConfirmSpend's reverted-receipt
-	// branch, which also returns value only. The pre-fix code added ps.GasCost
-	// back to the user (ETH path) and restored the gas reserve (ERC-20 path),
-	// refunding gas the vault had already spent — a slow drain a withdrawer
-	// could farm by repeatedly submitting reverting withdrawals. Only a
-	// genuinely-never-mined proof (Type-B, currently DISABLED/LOCKED per D-E-4)
-	// would justify refunding gas; if it is ever re-enabled it must restore the
-	// gas/reserve on its own path, not here.
+func refundDroppedWithdrawal(ps *PendingSpend, chainId uint64) {
+	// Reached only from confirmSpend's D3 branch: the roll (a 0-value vault
+	// self-transfer at this nonce) mined, so the withdrawal never can. The tx
+	// VALUE comes back, not the gas: the prepaid gas paid for the roll (E9:
+	// refunding gas the vault spent is a drain). The proven-revert paths
+	// (clearNonce, cancelMyWithdrawal, expireWithdrawal, confirmSpend's revert
+	// branch) use refundRevertedWithdrawal.
 	refund := new(big.Int).Set(ps.Amount)
-	IncBalance(ps.refundAccount(), ps.Asset, refund)
-	noteWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund)
+	// OPTION-2: a contract's payout that never reached L1 (a roll spent its
+	// nonce, so it can never mine) is sent again to the same address rather
+	// than swapped back (THORChain LackSigning reschedules an unsent outbound).
+	if resendPayout(ps, chainId) {
+		return
+	}
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, refund)
 	sup.User.Add(sup.User, refund)
 	SetSupply(ps.Asset, sup)
 	bookSpendRefund(ps, refund)
+	// A payout of a swap paid from Hive or Bitcoin goes back to its sender
+	// there, or is held for them (payoutreturn.go): never to a Magi balance.
+	if ps.ReturnAsset != "" {
+		returnPayoutToSender(ps, refund)
+		return
+	}
+	creditWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund, false)
 }
 
 // refundRevertedWithdrawal refunds a withdrawal whose L1 transaction is proven
@@ -1836,13 +1966,18 @@ func refundRevertedWithdrawal(ps *PendingSpend) {
 		IncBalance(constants.RevertFeeRecipient, ps.Asset, fee)
 		sdk.Log("revertfee|n=" + strconv.FormatUint(ps.Nonce, 10) + "|a=" + ps.Asset + "|v=" + fee.String() + "|to=" + constants.RevertFeeRecipient)
 	}
-	IncBalance(ps.refundAccount(), ps.Asset, refund)
-	noteWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund)
 	sup := GetSupply(ps.Asset)
 	sup.Active.Add(sup.Active, ps.Amount)
 	sup.User.Add(sup.User, ps.Amount)
 	SetSupply(ps.Asset, sup)
 	bookSpendRefund(ps, ps.Amount)
+	// A payout of a swap paid from Hive goes back to its sender there, or is
+	// held for them (payoutreturn.go): never to a Magi balance.
+	if ps.ReturnAsset != "" {
+		returnPayoutToSender(ps, refund)
+		return
+	}
+	creditWithdrawalRefund(ps.From, ps.To, ps.refundAccount(), ps.Asset, refund, true)
 }
 
 func HandleClearNonce(chainId uint64, proof L1ProofOfDrop) error {

@@ -32,12 +32,13 @@ func TestSendHome_RouteDepositMarksOnlyTheDefaultFallback(t *testing.T) {
 		router     string // "" none, "fail", "ok-pulls-nothing"
 		dest       string
 		refundable int64
+		owed       bool // held and owed home (credited to the hold, not dest)
 	}{
-		{"no instruction (a CEX send)", nil, "", did, 5_000},
-		{"explicit deposit_to", []string{"deposit_to=hive:alice"}, "", "hive:alice", 0},
-		{"swap without min: credited, refundable", []string{"swap_to=hive:bob", "asset_out=hbd"}, "fail", did, 5_000},
-		{"swap fails at the router", []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "fail", did, 5_000},
-		{"swap to deposit_to fails: explicit, not refundable", []string{"deposit_to=hive:alice", "swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "fail", "hive:alice", 0},
+		{"no instruction (a CEX send)", nil, "", did, 5_000, false},
+		{"explicit deposit_to", []string{"deposit_to=hive:alice"}, "", "hive:alice", 0, false},
+		{"swap without min: held, owed home", []string{"swap_to=hive:bob", "asset_out=hbd"}, "fail", did, 0, true},
+		{"swap fails at the router: held, owed home", []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "fail", did, 0, true},
+		{"swap to deposit_to fails: explicit, not refundable", []string{"deposit_to=hive:alice", "swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "fail", "hive:alice", 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -50,9 +51,12 @@ func TestSendHome_RouteDepositMarksOnlyTheDefaultFallback(t *testing.T) {
 					return &r
 				})
 			}
-			got := routeDeposit(sender, c.instr, "eth", amt, 1)
-			if got != c.dest {
-				t.Fatalf("dest %q, want %q", got, c.dest)
+			got, held := routeDeposit(sender, c.instr, "eth", amt, 1)
+			if got != c.dest || held != c.owed {
+				t.Fatalf("dest %q held=%v, want %q held=%v", got, held, c.dest, c.owed)
+			}
+			if o := getOwedHome(did, "eth").Sign() > 0; o != c.owed {
+				t.Fatalf("owed home %v, want %v", o, c.owed)
 			}
 			if r := getRefundable(did, "eth"); r.Int64() != c.refundable {
 				t.Fatalf("refundable %s, want %d", r, c.refundable)
@@ -85,20 +89,26 @@ func TestSendHome_WithdrawalRefundsMarkedOnlyWhenNothingChanges(t *testing.T) {
 	own := crypto.AddressToHex(shSender())
 	cases := []struct {
 		name, from, to, account string
-		marked                  bool
+		marked, held            bool
 	}{
-		{"a contract withdrew for the account", "contract:vsc1router", "0x00000000000000000000000000000000000000e2", did, true},
-		{"the account withdrew to its own address", did, own, did, true},
-		{"the account withdrew elsewhere", did, "0x00000000000000000000000000000000000000e2", did, false},
-		{"a hive account", "contract:vsc1router", own, "hive:alice", false},
+		{"a contract withdrew for the account: held, owed home", "contract:vsc1router", "0x00000000000000000000000000000000000000e2", did, false, true},
+		{"the account withdrew to its own address", did, own, did, true, false},
+		{"the account withdrew elsewhere", did, "0x00000000000000000000000000000000000000e2", did, false, false},
+		{"a hive account (a Magi sender): credited", "contract:vsc1router", own, "hive:alice", false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			sdk.ResetStubState()
 			sdk.ResetTestState()
-			noteWithdrawalRefund(c.from, c.to, c.account, "eth", big.NewInt(777))
+			creditWithdrawalRefund(c.from, c.to, c.account, "eth", big.NewInt(777), true)
 			if got := getRefundable(c.account, "eth").Sign() > 0; got != c.marked {
 				t.Fatalf("marked %v, want %v", got, c.marked)
+			}
+			if held := GetBalance(constants.OwedHomeHoldAccount, "eth").Sign() > 0; held != c.held {
+				t.Fatalf("held %v, want %v", held, c.held)
+			}
+			if onBalance := GetBalance(c.account, "eth").Sign() > 0; onBalance == c.held {
+				t.Fatalf("on the account's balance %v, held %v", onBalance, c.held)
 			}
 		})
 	}
@@ -128,7 +138,7 @@ func TestSendHome_AnyoneReturnsItToTheAddressItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendHome: %v", err)
 	}
-	if !strings.HasPrefix(status, "issued:") && !strings.HasPrefix(status, "queued:") {
+	if !strings.HasPrefix(status, "issued:") { // PAYOUT-1: sendHome is sent at once or refused
 		t.Fatalf("status %q", status)
 	}
 	debited := new(big.Int).Sub(before, GetBalance(holder, "eth"))
@@ -157,7 +167,7 @@ func TestSendHome_AnyoneReturnsItToTheAddressItself(t *testing.T) {
 func TestSendHome_ATokenGoesHomeUnderItsRegisteredSymbol(t *testing.T) {
 	holder := crypto.AddressToDID(shSender())
 	addr := crypto.AddressToHex(shSender())
-	rpBridge(t, ethWei(1), holder, "hive:keeper") // holder: 1,000,000 USDC (6 decimals)
+	rpBridge(t, ethWei(20), holder, "hive:keeper") // holder: 1,000,000 USDC (6 decimals); the reserve fronts the gas
 	var tok [20]byte
 	tok[19] = 0xc0
 	if err := RegisterToken(1, tok, "USDC", 6, 1000); err != nil {
@@ -178,7 +188,7 @@ func TestSendHome_ATokenGoesHomeUnderItsRegisteredSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendHome USDC: %v", err)
 	}
-	if !strings.HasPrefix(status, "issued:") && !strings.HasPrefix(status, "queued:") {
+	if !strings.HasPrefix(status, "issued:") { // PAYOUT-1: sendHome is sent at once or refused
 		t.Fatalf("status %q", status)
 	}
 	debited := new(big.Int).Sub(before, GetBalance(holder, "USDC"))
@@ -232,7 +242,7 @@ func TestRouteDeposit_FailedSwapLogsTheReason(t *testing.T) {
 				r := c.outcome
 				return &r
 			})
-			if got := routeDeposit(shSender(), []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "eth", big.NewInt(5_000), 1); got != did {
+			if got, _ := routeDeposit(shSender(), []string{"swap_to=hive:bob", "asset_out=hbd", "min_amount_out=9"}, "eth", big.NewInt(5_000), 1); got != did {
 				t.Fatalf("dest %q, want the sender %q", got, did)
 			}
 			found := false

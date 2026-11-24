@@ -90,6 +90,13 @@ func stubVerifyAddress(a string) string {
 		if _, err := hex.DecodeString(h); err == nil && len(h) == 40 {
 			return "user:evm"
 		}
+	case strings.HasPrefix(a, "did:pkh:bip122:000000000019d6689c085ae165831e93:"),
+		strings.HasPrefix(a, "did:pkh:bip122:000000000933ea01ad0ee984209779ba:"):
+		// A Bitcoin address's identity (node lib/dids btc.go; the node accepts
+		// only its own network's chain id, the stub either).
+		if addr := a[strings.LastIndex(a, ":")+1:]; len(addr) >= 26 && len(addr) <= 90 {
+			return "user:btc"
+		}
 	case strings.HasPrefix(a, "hive:"):
 		u := strings.TrimPrefix(a, "hive:")
 		if stubHiveName.MatchString(u) && len(u) >= 3 && len(u) < 17 {

@@ -46,55 +46,58 @@ func TestRefundTo_OnlyAContractMayNameOne(t *testing.T) {
 	}
 }
 
-// QFREEZE-1's refund of an unpayable queued withdrawal goes to refund_to.
-func TestRefundTo_QueueRefundGoesToTheUser(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
-	routerBefore := GetBalance(rtRouter, "eth")
-	if out, err := rtUnmapETH(t, "hive:alice", "1", qfStale); err != nil || !strings.HasPrefix(out, "queued:") {
-		t.Fatalf("routed unmap: %q %v, want queued", out, err)
+// PAYOUT-1 (owner 11-21: wait and retry): a contract's withdrawal that cannot be
+// sent now waits in the queue and is sent when it can; nothing about it lands
+// in refund_to's Magi balance meanwhile.
+func TestRefundTo_StalePriceQueuesThenSends(t *testing.T) {
+	rpBridge(t, ethWei(20), rtRouter)
+	out, err := rtUnmapETH(t, "hive:alice", "", qfStale)
+	if err != nil || !strings.HasPrefix(out, "queued:") {
+		t.Fatalf("routed unmap at a stale price: %q %v, want queued", out, err)
 	}
 	head, _ := QueueBounds()
-	q := GetQueued(head)
-	if q == nil || q.RefundTo != "hive:alice" || q.From != rtRouter {
-		t.Fatalf("queued record %+v, want from the router, refunds to alice", q)
+	if q := GetQueued(head); q == nil || !q.Payout || q.RefundTo != "hive:alice" {
+		t.Fatalf("queued record %+v, want a payout for alice", q)
 	}
-	as(t, "hive:alice", rpNow) // fresh price: the 1-wei cap cannot pay -> refund
-	drainWith(1, [20]byte{1}, 8)
-	if QueueLen() != 0 {
-		t.Fatalf("queue %d after the drain, want the entry refunded", QueueLen())
+	as(t, "hive:alice", rpNow) // a fresh price: the drain sends it
+	if n := drainWith(1, [20]byte{1}, 8); n != 1 || QueueLen() != 0 {
+		t.Fatalf("drain issued %d, queue %d", n, QueueLen())
 	}
-	if got := GetBalance("hive:alice", "eth"); got.Cmp(q.Debit) != 0 {
-		t.Fatalf("alice %s, want the debit %s back", got, q.Debit)
+	ps := GetPendingSpend(0)
+	if fee := payoutGasFee(constants.ETHTransferGas, 1e9, 2_000_000_000); new(big.Int).Sub(big.NewInt(1e16), ps.Amount).Cmp(fee) != 0 {
+		t.Fatalf("sent %s, want the amount less the payout fee %s", ps.Amount, fee)
 	}
-	if got := GetBalance(rtRouter, "eth"); new(big.Int).Sub(routerBefore, got).Cmp(q.Debit) != 0 {
-		t.Fatalf("router %s, want %s less the debit (nothing refunded to it)", got, routerBefore)
+	if GetBalance("hive:alice", "eth").Sign() != 0 {
+		t.Fatal("something reached alice's Magi balance")
 	}
+	ethInvariant(t, "after the drain")
 }
 
-// The user a routed withdrawal refunds to may cancel it; a stranger may not.
-func TestRefundTo_TheUserCancels(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
-	if _, err := rtUnmapETH(t, "hive:alice", "", qfStale); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := QueueBounds()
-	q := GetQueued(head)
+// An entry a contract queued before PAYOUT-1 keeps its refund_to: its user may
+// cancel it, a stranger may not, and the debit goes to the user.
+func TestRefundTo_TheUserCancelsALegacyEntry(t *testing.T) {
+	rpBridge(t, ethWei(20), rtRouter)
+	debit := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e16))
+	DecBalance(rtRouter, "eth", debit)
+	TrackWithdrawal("eth", debit)
+	seq := Enqueue(QueuedWithdrawal{From: rtRouter, To: qfTo, Asset: "eth", Amount: debit, Debit: debit, FeeCap: big.NewInt(1), DeductFee: true, RefundTo: "hive:alice"})
 	as(t, "hive:mallory", rpNow)
-	if err := HandleCancelQueuedWithdrawal(head); err == nil {
+	if err := HandleCancelQueuedWithdrawal(seq); err == nil {
 		t.Fatal("a stranger cancelled a routed withdrawal")
 	}
 	as(t, "hive:alice", rpNow)
-	if err := HandleCancelQueuedWithdrawal(head); err != nil {
+	if err := HandleCancelQueuedWithdrawal(seq); err != nil {
 		t.Fatalf("alice cancel: %v", err)
 	}
-	if got := GetBalance("hive:alice", "eth"); got.Cmp(q.Debit) != 0 || QueueLen() != 0 {
-		t.Fatalf("alice %s (want %s), queue %d", got, q.Debit, QueueLen())
+	if got := GetBalance("hive:alice", "eth"); got.Cmp(debit) != 0 || QueueLen() != 0 {
+		t.Fatalf("alice %s (want %s), queue %d", got, debit, QueueLen())
 	}
+	ethInvariant(t, "after the cancel")
 }
 
 // Issued, the record keeps refund_to, and a proven revert refunds the user.
 func TestRefundTo_InFlightRefundGoesToTheUser(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
+	rpBridge(t, ethWei(20), rtRouter)
 	out, err := rtUnmapETH(t, "hive:alice", "", rpNow)
 	if err != nil || !strings.HasPrefix(out, "issued:") {
 		t.Fatalf("routed unmap: %q %v, want issued", out, err)
@@ -117,21 +120,72 @@ func TestRefundTo_InFlightRefundGoesToTheUser(t *testing.T) {
 	}
 }
 
-// Routed withdrawals count against each user's queued cap, not one shared
-// router cap a single user could fill for everyone.
-func TestRefundTo_QueueCapIsPerUser(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
-	SetPendingNonce(constants.MaxInFlightWithdrawals) // every slot in flight: requests queue
+// With every slot in flight a contract's withdrawal waits in the queue; each
+// user's queued payouts still count against that user's cap.
+func TestRefundTo_AllSlotsInFlightQueues(t *testing.T) {
+	rpBridge(t, ethWei(20), rtRouter)
+	SetPendingNonce(constants.MaxInFlightWithdrawals) // every slot in flight
 	for i := uint64(0); i < constants.MaxQueuedPerAccount; i++ {
-		if _, err := rtUnmapETH(t, "hive:alice", "", rpNow); err != nil {
-			t.Fatalf("alice's routed entry %d: %v", i+1, err)
+		if out, err := rtUnmapETH(t, "hive:alice", "", rpNow); err != nil || !strings.HasPrefix(out, "queued:") {
+			t.Fatalf("alice's routed entry %d: %q %v", i+1, out, err)
 		}
 	}
 	if _, err := rtUnmapETH(t, "hive:alice", "", rpNow); err == nil || !strings.Contains(err.Error(), "withdrawals queued") {
-		t.Fatalf("alice's 17th: %v, want her cap", err)
+		t.Fatalf("alice's 17th: %v, want her cap (the swap then goes back to its sender)", err)
 	}
 	if out, err := rtUnmapETH(t, "hive:bob", "", rpNow); err != nil || !strings.HasPrefix(out, "queued:") {
 		t.Fatalf("bob behind alice's full cap: %q %v", out, err)
+	}
+}
+
+// A dropped in-flight payout's value goes to refund_to. A fee-on-top payout is
+// debited exactly its fee: nothing of a cap is held back to refund later.
+func TestRefundTo_DroppedAndFeeOnTopGoToTheUser(t *testing.T) {
+	rpBridge(t, ethWei(20), rtRouter)
+	asContract(t, rtRouter, "hive:alice", rpNow)
+	routerBefore := GetBalance(rtRouter, "eth")
+	capWei := "5000000000000000" // 0.005 ETH, far above the payout fee
+	out, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: qfTo, Asset: "eth", MaxFee: capWei, RefundTo: "hive:alice"}, [20]byte{1}, 1)
+	if err != nil || !strings.HasPrefix(out, "issued:") {
+		t.Fatalf("routed unmap: %q %v, want issued", out, err)
+	}
+	ps := GetPendingSpend(0)
+	if ps == nil || ps.RefundTo != "hive:alice" {
+		t.Fatalf("issued record %+v", ps)
+	}
+	fee := payoutGasFee(constants.ETHTransferGas, 1e9, 2_000_000_000)
+	debited := new(big.Int).Sub(routerBefore, GetBalance(rtRouter, "eth"))
+	if want := new(big.Int).Add(big.NewInt(1e16), new(big.Int).Add(fee, ProofFee("eth"))); debited.Cmp(want) != 0 {
+		t.Fatalf("router debited %s, want amount + payout fee + proof fee %s", debited, want)
+	}
+	if GetBalance("hive:alice", "eth").Sign() != 0 {
+		t.Fatal("something of the fee cap was refunded to a Magi balance")
+	}
+	// A rolled payout is sent again (paying its own gas), never refunded to a
+	// Magi balance.
+	refundDroppedWithdrawal(ps, 1)
+	head, _ := QueueBounds()
+	if q := GetQueued(head); q == nil || q.Attempt != 1 || q.Amount.Cmp(ps.Amount) != 0 || GetBalance("hive:alice", "eth").Sign() != 0 {
+		t.Fatalf("rolled payout: queue %+v, alice %s; want it sent again", q, GetBalance("hive:alice", "eth"))
+	}
+}
+
+// The token path: a routed USDC payout's revert refunds the user too.
+func TestRefundTo_TokenWithdrawalRefundsTheUser(t *testing.T) {
+	rpBridge(t, ethWei(20), rtRouter)
+	asContract(t, rtRouter, "hive:alice", rpNow)
+	out, err := HandleUnmapERC20(&TransferParams{Amount: "1000", To: qfTo, Asset: "USDC",
+		TokenAddress: "0x00000000000000000000000000000000000000c0", RefundTo: "hive:alice"}, [20]byte{1}, 1)
+	if err != nil || !strings.HasPrefix(out, "issued:") {
+		t.Fatalf("routed USDC unmap: %q %v, want issued", out, err)
+	}
+	ps := GetPendingSpend(0)
+	if ps == nil || ps.RefundTo != "hive:alice" {
+		t.Fatalf("issued USDC record %+v, want refunds to alice", ps)
+	}
+	refundRevertedWithdrawal(ps)
+	if got := GetBalance("hive:alice", "USDC"); got.Cmp(ps.Amount) != 0 {
+		t.Fatalf("alice USDC %s, want %s back", got, ps.Amount)
 	}
 }
 
@@ -142,57 +196,5 @@ func TestRefundTo_AbsentMeansTheWithdrawer(t *testing.T) {
 	ps := PendingSpend{From: "hive:u"}
 	if q.refundAccount() != "hive:u" || ps.refundAccount() != "hive:u" || !ps.isWithdrawer("hive:u") {
 		t.Fatal("absent refund_to must mean the withdrawer")
-	}
-}
-
-// The other two refund paths: the unused part of a fee-on-top cap, returned
-// when a QUEUED withdrawal is issued at a lower price (one issued at once is
-// debited the exact fee), and a dropped in-flight withdrawal's value.
-func TestRefundTo_DroppedAndUnusedFeeGoToTheUser(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
-	asContract(t, rtRouter, "hive:alice", qfStale) // no fresh price: it queues
-	capWei := "5000000000000000"                    // 0.005 ETH, far above the priced fee
-	out, err := HandleUnmapETH(&TransferParams{Amount: "10000000000000000", To: qfTo, Asset: "eth", MaxFee: capWei, RefundTo: "hive:alice"}, [20]byte{1}, 1)
-	if err != nil || !strings.HasPrefix(out, "queued:") {
-		t.Fatalf("routed unmap: %q %v, want queued", out, err)
-	}
-	as(t, "hive:alice", rpNow) // fresh price: the drain issues it
-	drainWith(1, [20]byte{1}, 8)
-	ps := GetPendingSpend(0)
-	if ps == nil || ps.RefundTo != "hive:alice" {
-		t.Fatalf("issued record %+v", ps)
-	}
-	unused := GetBalance("hive:alice", "eth")
-	if unused.Sign() <= 0 {
-		t.Fatal("the unused part of the fee cap was not returned to alice")
-	}
-	if GetBalance(rtRouter, "eth").Cmp(new(big.Int).Mul(big.NewInt(10), big.NewInt(1e18))) >= 0 {
-		t.Fatal("the router kept its whole balance: the withdrawal debited nothing")
-	}
-	before := new(big.Int).Set(unused)
-	refundDroppedWithdrawal(ps)
-	if got := new(big.Int).Sub(GetBalance("hive:alice", "eth"), before); got.Cmp(ps.Amount) != 0 {
-		t.Fatalf("dropped refund to alice %s, want %s", got, ps.Amount)
-	}
-}
-
-// The token path: a routed USDC withdrawal refunds the user too.
-func TestRefundTo_TokenWithdrawalRefundsTheUser(t *testing.T) {
-	rpBridge(t, big.NewInt(0), rtRouter)
-	asContract(t, rtRouter, "hive:alice", qfStale)
-	if _, err := HandleUnmapERC20(&TransferParams{Amount: "1000", To: qfTo, Asset: "USDC",
-		TokenAddress: "0x00000000000000000000000000000000000000c0", RefundTo: "hive:alice"}, [20]byte{1}, 1); err != nil {
-		t.Fatal(err)
-	}
-	head, _ := QueueBounds()
-	if q := GetQueued(head); q == nil || q.RefundTo != "hive:alice" {
-		t.Fatalf("queued USDC record %+v, want refunds to alice", q)
-	}
-	as(t, "hive:alice", rpNow)
-	if err := HandleCancelQueuedWithdrawal(head); err != nil {
-		t.Fatalf("alice cancels her routed USDC withdrawal: %v", err)
-	}
-	if got := GetBalance("hive:alice", "USDC"); got.Cmp(big.NewInt(1000)) != 0 {
-		t.Fatalf("alice USDC %s, want the 1000 back", got)
 	}
 }

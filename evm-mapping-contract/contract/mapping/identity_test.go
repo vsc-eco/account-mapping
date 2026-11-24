@@ -18,7 +18,7 @@ func TestC6E21_DepositIsCreditedToTheCanonicalIdentity(t *testing.T) {
 	sender, _ := crypto.HexToAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
 	const want = "did:pkh:eip155:1:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 	for _, chainId := range []uint64{1, 11155111, 8453} {
-		if got := routeDeposit(sender, nil, "eth", big.NewInt(1000), chainId); got != want {
+		if got, _ := routeDeposit(sender, nil, "eth", big.NewInt(1000), chainId); got != want {
 			t.Errorf("chain %d: deposit credited to %s, want %s", chainId, got, want)
 		}
 	}

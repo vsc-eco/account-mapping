@@ -61,11 +61,19 @@ type inclusionClose struct {
 	UserGas      *big.Int `json:"u,omitempty"`
 	Price        uint64   `json:"p"`
 	ReceiptsRoot string   `json:"rr"`
+	// A payout of a swap paid from Hive: a revert goes back there (PAYOUT-1).
+	ReturnAsset string   `json:"ra,omitempty"`
+	ReturnMin   *big.Int `json:"rm,omitempty"`
+	// OPTION-2: the payout context a revert's return keeps.
+	Payout   bool   `json:"po,omitempty"`
+	Attempt  uint8  `json:"at,omitempty"`
+	GasLimit uint64 `json:"g,omitempty"`
 }
 
 func (c *inclusionClose) spend() *PendingSpend {
 	return &PendingSpend{Nonce: c.Nonce, Amount: c.Amount, From: c.From, To: c.To, Asset: constants.NativeAsset,
-		VaultAtQueue: c.Vault, RefundTo: c.RefundTo, GasCost: c.GasCost}
+		VaultAtQueue: c.Vault, RefundTo: c.RefundTo, GasCost: c.GasCost,
+		ReturnAsset: c.ReturnAsset, ReturnMin: c.ReturnMin, Payout: c.Payout, Attempt: c.Attempt, GasLimit: c.GasLimit}
 }
 
 func inclusionCloseKey(block, txIndex uint64) string {
@@ -81,7 +89,8 @@ func closeOnInclusion(ps *PendingSpend, tx *ParsedTx, header *blocklist.EthBlock
 	}
 	userGas, _ := spendGasShares(ps) // before DeletePendingSpend clears the reserve's share
 	rec := inclusionClose{Nonce: ps.Nonce, Amount: ps.Amount, From: ps.From, To: ps.To, RefundTo: ps.RefundTo,
-		Vault: ps.VaultAtQueue, GasCost: ps.GasCost, UserGas: userGas, Price: effectiveGasPrice(tx, header.BaseFeePerGas)}
+		Vault: ps.VaultAtQueue, GasCost: ps.GasCost, UserGas: userGas, Price: effectiveGasPrice(tx, header.BaseFeePerGas),
+		ReturnAsset: ps.ReturnAsset, ReturnMin: ps.ReturnMin, Payout: ps.Payout, Attempt: ps.Attempt, GasLimit: ps.GasLimit}
 	if !isPaused() {
 		rec.ReceiptsRoot = hex.EncodeToString(header.ReceiptsRoot[:])
 	}

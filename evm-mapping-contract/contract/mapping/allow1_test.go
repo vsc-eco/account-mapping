@@ -117,12 +117,12 @@ func TestA5_MalformedDepositDestinationCreditsTheDepositor(t *testing.T) {
 	var sender [20]byte
 	sender[19] = 0xd1
 	for _, instr := range [][]string{{"deposit_to=bob-hive:mallory"}, {"deposit_to=not an address"}, {"swap_to=hive:Alice", "asset_out=hbd"}} {
-		dest := routeDeposit(sender, instr, "eth", big.NewInt(1000), 1)
+		dest, _ := routeDeposit(sender, instr, "eth", big.NewInt(1000), 1)
 		if strings.Contains(dest, "mallory") || strings.Contains(dest, "not an") || dest == "" {
 			t.Errorf("instructions %v routed the deposit to %q, want the depositor", instr, dest)
 		}
 	}
-	if dest := routeDeposit(sender, []string{"deposit_to=hive:bob"}, "eth", big.NewInt(1000), 1); dest != "hive:bob" {
+	if dest, _ := routeDeposit(sender, []string{"deposit_to=hive:bob"}, "eth", big.NewInt(1000), 1); dest != "hive:bob" {
 		t.Errorf("a valid deposit_to=hive:bob routed to %q", dest)
 	}
 }
@@ -141,7 +141,7 @@ func TestA5_MalformedSwapRecipientNeverReachesTheRouter(t *testing.T) {
 	})
 	var sender [20]byte
 	sender[19] = 0xd1
-	dest := routeDeposit(sender, []string{"swap_to=hive:Alice", "asset_out=hbd"}, "eth", big.NewInt(1000), 1)
+	dest, _ := routeDeposit(sender, []string{"swap_to=hive:Alice", "asset_out=hbd"}, "eth", big.NewInt(1000), 1)
 	if calls != 0 {
 		t.Errorf("router called %d times for swap_to=hive:Alice", calls)
 	}

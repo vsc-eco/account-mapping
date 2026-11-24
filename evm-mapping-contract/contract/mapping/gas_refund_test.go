@@ -51,7 +51,7 @@ func TestGasReserve_MinedRevertedWithdrawalKeepsReserveSpent(t *testing.T) {
 		GasCost: gasCost,
 	}
 
-	refundDroppedWithdrawal(ps)
+	refundDroppedWithdrawal(ps, 1)
 
 	// E9 (RV re-verify): the only accepted drop proof is Type-A (mined,
 	// reverted) — the L1 gas was really paid, so the reserve is NOT restored
@@ -94,7 +94,7 @@ func TestGasReserve_MinedRevertedETHWithdrawalRefundsValueOnly(t *testing.T) {
 		GasCost: fee,
 	}
 
-	refundDroppedWithdrawal(ps)
+	refundDroppedWithdrawal(ps, 1)
 
 	// E9 (RV re-verify): Type-A (mined, reverted) is the only accepted drop
 	// proof, so the gas was really spent — refund the VALUE only, not value+fee.
@@ -112,7 +112,7 @@ func TestGasReserve_MinedRevertedETHWithdrawalRefundsValueOnly(t *testing.T) {
 	// nil-GasCost legacy entries must not panic and refund Amount only.
 	sdk.ResetTestStateStore()
 	SetSupply("eth", Supply{Active: new(big.Int), User: new(big.Int), Fee: new(big.Int)})
-	refundDroppedWithdrawal(&PendingSpend{Amount: value, From: "hive:bob", Asset: "eth"})
+	refundDroppedWithdrawal(&PendingSpend{Amount: value, From: "hive:bob", Asset: "eth"}, 1)
 	if got := GetBalance("hive:bob", "eth"); got.Cmp(value) != 0 {
 		t.Fatalf("nil-GasCost refund: want %s, got %s", value, got)
 	}

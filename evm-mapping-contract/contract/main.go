@@ -578,6 +578,34 @@ func drainWithdrawalQueue(input *string) *string {
 	return &out // how many were issued
 }
 
+// retryPayoutReturn (PAYOUT-1): the bridge's bot (a registered relayer) swaps
+// a held return back to its sender, at its min_out (today's price less 1%) and
+// for the first day never below the swap's own floor.
+//
+//go:wasmexport retryPayoutReturn
+func retryPayoutReturn(input *string) *string {
+	var p mapping.PayoutReturnParams
+	unmarshalParams(input, &p)
+	out, err := mapping.HandleRetryPayoutReturn(p.Id, p.MinOut)
+	if err != nil {
+		ce.CustomAbort(err)
+	}
+	return &out // the swap's amount_out
+}
+
+// releasePayoutReturn (PAYOUT-1): a held return's sender takes it back now, at
+// the least they accept (min_out).
+//
+//go:wasmexport releasePayoutReturn
+func releasePayoutReturn(input *string) *string {
+	var p mapping.PayoutReturnParams
+	unmarshalParams(input, &p)
+	if err := mapping.HandleReleasePayoutReturn(p.Id, p.MinOut, p.To, vault(), chainId()); err != nil {
+		ce.CustomAbort(err)
+	}
+	return nil
+}
+
 // RP-11: the owner of a queued (not yet issued) withdrawal takes it back.
 //
 //go:wasmexport cancelQueuedWithdrawal
@@ -744,6 +772,14 @@ func getInfo(input *string) *string {
 	if input != nil && *input != "" {
 		var q struct {
 			Symbol string `json:"symbol"`
+			// Fees: also answer payout_gas_fee (PAYOUT-1), what a payout of
+			// this asset pays for gas now in its base units, for a wallet to
+			// show what arrives. It reads the newest L1 header, so the router's
+			// own getInfo leaves it out.
+			Fees bool `json:"fees"`
+			// GasLimit (ETH): price the payout at the gas_limit the wallet will
+			// send with it (its recipient's estimate); 0 = the default.
+			GasLimit uint64 `json:"gas_limit"`
 		}
 		if json.Unmarshal([]byte(*input), &q) == nil && q.Symbol != "" {
 			var rec map[string]string
@@ -757,6 +793,14 @@ func getInfo(input *string) *string {
 			}
 			if rec != nil {
 				rec["proof_fee"] = mapping.ProofFee(q.Symbol).String()
+				if q.Fees {
+					// "" when a payout cannot be priced now (no fresh L1
+					// header): it would be refused.
+					rec["payout_gas_fee"] = ""
+					if f := mapping.PayoutGasFee(q.Symbol, q.GasLimit); f != nil {
+						rec["payout_gas_fee"] = f.String()
+					}
+				}
 				if b, err := json.Marshal(rec); err == nil {
 					out := string(b)
 					return &out
